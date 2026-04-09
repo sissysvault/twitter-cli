@@ -119,6 +119,18 @@ def test_cli_feed_accepts_cursor_and_emits_pagination(monkeypatch) -> None:
     assert payload["pagination"]["nextCursor"] == "cursor-next"
 
 
+def test_cli_feed_rejects_cursor_with_input(tmp_path, tweet_factory) -> None:
+    json_path = tmp_path / "tweets.json"
+    json_path.write_text(tweets_to_json([tweet_factory("1")]), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["feed", "--input", str(json_path), "--cursor", "cursor-prev"])
+
+    assert result.exit_code != 0
+    assert "--input" in result.output
+    assert "--cursor" in result.output
+
+
 def test_print_tweet_table_truncates_text_by_default(tweet_factory) -> None:
     long_text = "A" * 140
     console = Console(record=True, width=400)

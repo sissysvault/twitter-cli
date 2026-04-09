@@ -333,6 +333,20 @@ class TestBuildHeaders:
 
 
 class TestPaginationBehavior:
+    def test_fetch_timeline_with_return_cursor_and_zero_count_returns_empty_tuple(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._max_count = 200
+
+        tweets, cursor = client._fetch_timeline(
+            "HomeTimeline",
+            0,
+            lambda data: data,
+            return_cursor=True,
+        )
+
+        assert tweets == []
+        assert cursor is None
+
     def test_fetch_timeline_can_include_promoted_content(self):
         client = TwitterClient.__new__(TwitterClient)
         client._request_delay = 0.0

@@ -11,7 +11,7 @@ import os
 import random
 import time
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, overload, cast
 
 import bs4
 from curl_cffi import requests as _cffi_requests
@@ -57,7 +57,7 @@ from .parser import (
 )
 
 if TYPE_CHECKING:
-    from typing import Dict, List, Optional, Set, Tuple  # noqa: F401
+    from typing import Dict, List, Optional, Set, Tuple, Union  # noqa: F401
 
     from .models import Tweet  # noqa: F401
 
@@ -153,28 +153,82 @@ class TwitterClient:
 
     # ── Read operations ──────────────────────────────────────────────
 
+    @overload
+    def fetch_home_timeline(
+        self,
+        count: int = 20,
+        include_promoted: bool = False,
+        cursor: Optional[str] = None,
+        return_cursor: Literal[False] = False,
+    ) -> List[Tweet]: ...
+
+    @overload
+    def fetch_home_timeline(
+        self,
+        count: int = 20,
+        include_promoted: bool = False,
+        cursor: Optional[str] = None,
+        return_cursor: Literal[True] = True,
+    ) -> Tuple[List[Tweet], Optional[str]]: ...
+
     def fetch_home_timeline(self, count=20, include_promoted=False, cursor=None, return_cursor=False):
-        # type: (int, bool, Optional[str], bool) -> Any
+        # type: (int, bool, Optional[str], bool) -> Union[List[Tweet], Tuple[List[Tweet], Optional[str]]]
         """Fetch home timeline tweets."""
+        if return_cursor:
+            return self._fetch_timeline(
+                "HomeTimeline",
+                count,
+                lambda data: _deep_get(data, "data", "home", "home_timeline_urt", "instructions"),
+                include_promoted=include_promoted,
+                start_cursor=cursor,
+                return_cursor=True,
+            )
         return self._fetch_timeline(
             "HomeTimeline",
             count,
             lambda data: _deep_get(data, "data", "home", "home_timeline_urt", "instructions"),
             include_promoted=include_promoted,
             start_cursor=cursor,
-            return_cursor=return_cursor,
+            return_cursor=False,
         )
 
+    @overload
+    def fetch_following_feed(
+        self,
+        count: int = 20,
+        include_promoted: bool = False,
+        cursor: Optional[str] = None,
+        return_cursor: Literal[False] = False,
+    ) -> List[Tweet]: ...
+
+    @overload
+    def fetch_following_feed(
+        self,
+        count: int = 20,
+        include_promoted: bool = False,
+        cursor: Optional[str] = None,
+        return_cursor: Literal[True] = True,
+    ) -> Tuple[List[Tweet], Optional[str]]: ...
+
     def fetch_following_feed(self, count=20, include_promoted=False, cursor=None, return_cursor=False):
-        # type: (int, bool, Optional[str], bool) -> Any
+        # type: (int, bool, Optional[str], bool) -> Union[List[Tweet], Tuple[List[Tweet], Optional[str]]]
         """Fetch chronological following feed."""
+        if return_cursor:
+            return self._fetch_timeline(
+                "HomeLatestTimeline",
+                count,
+                lambda data: _deep_get(data, "data", "home", "home_timeline_urt", "instructions"),
+                include_promoted=include_promoted,
+                start_cursor=cursor,
+                return_cursor=True,
+            )
         return self._fetch_timeline(
             "HomeLatestTimeline",
             count,
             lambda data: _deep_get(data, "data", "home", "home_timeline_urt", "instructions"),
             include_promoted=include_promoted,
             start_cursor=cursor,
-            return_cursor=return_cursor,
+            return_cursor=False,
         )
 
     def fetch_bookmarks(self, count=50):
@@ -738,8 +792,38 @@ class TwitterClient:
 
     # ── Internal: timeline / user list fetchers ──────────────────────
 
+    @overload
+    def _fetch_timeline(
+        self,
+        operation_name: str,
+        count: int,
+        get_instructions: TimelineInstructionGetter,
+        extra_variables: Optional[Dict[str, Any]] = None,
+        override_base_variables: bool = False,
+        field_toggles: Optional[Dict[str, Any]] = None,
+        use_post: bool = False,
+        include_promoted: bool = False,
+        start_cursor: Optional[str] = None,
+        return_cursor: Literal[False] = False,
+    ) -> List[Tweet]: ...
+
+    @overload
+    def _fetch_timeline(
+        self,
+        operation_name: str,
+        count: int,
+        get_instructions: TimelineInstructionGetter,
+        extra_variables: Optional[Dict[str, Any]] = None,
+        override_base_variables: bool = False,
+        field_toggles: Optional[Dict[str, Any]] = None,
+        use_post: bool = False,
+        include_promoted: bool = False,
+        start_cursor: Optional[str] = None,
+        return_cursor: Literal[True] = True,
+    ) -> Tuple[List[Tweet], Optional[str]]: ...
+
     def _fetch_timeline(self, operation_name, count, get_instructions, extra_variables=None, override_base_variables=False, field_toggles=None, use_post=False, include_promoted=False, start_cursor=None, return_cursor=False):
-        # type: (str, int, Callable[[Any], Any], Optional[Dict[str, Any]], bool, Optional[Dict[str, Any]], bool, bool, Optional[str], bool) -> Any
+        # type: (str, int, Callable[[Any], Any], Optional[Dict[str, Any]], bool, Optional[Dict[str, Any]], bool, bool, Optional[str], bool) -> Union[List[Tweet], Tuple[List[Tweet], Optional[str]]]
         """Generic timeline fetcher with pagination and deduplication.
 
         Args:
@@ -750,6 +834,8 @@ class TwitterClient:
                 endpoints like SearchTimeline that Twitter migrated to POST.
         """
         if count <= 0:
+            if return_cursor:
+                return [], None
             return []
 
         # Enforce max count cap

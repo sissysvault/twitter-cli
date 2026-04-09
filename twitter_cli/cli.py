@@ -431,6 +431,8 @@ def feed(ctx, feed_type, max_count, cursor, as_json, as_yaml, input_file, output
     config = load_config()
     try:
         if input_file:
+            if cursor:
+                raise click.UsageError("`twitter feed --input` does not support --cursor.")
             if rich_output:
                 console.print("📂 Loading tweets from %s..." % input_file)
             tweets = _load_tweets_from_json(input_file)
