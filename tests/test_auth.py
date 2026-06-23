@@ -13,20 +13,19 @@ from twitter_cli import auth
 def test_get_cookies_prefers_env(monkeypatch) -> None:
     monkeypatch.setattr(auth, "load_from_env", lambda: {"auth_token": "env-token", "ct0": "env-csrf"})
     monkeypatch.setattr(auth, "extract_from_browser", lambda: pytest.fail("should not extract from browser"))
-    seen = []
     monkeypatch.setattr(
         auth,
         "verify_cookies",
-        lambda auth_token, ct0, cookie_string=None: seen.append((auth_token, ct0, cookie_string)) or {},
+        lambda auth_token, ct0, cookie_string=None: pytest.fail("should not preflight env cookies"),
     )
 
     cookies = auth.get_cookies()
 
     assert cookies == {"auth_token": "env-token", "ct0": "env-csrf"}
-    assert seen == [("env-token", "env-csrf", None)]
 
 
-def test_get_cookies_reextracts_after_verify_failure(monkeypatch) -> None:
+def test_get_cookies_reextracts_after_verify_failure_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("TWITTER_VERIFY_COOKIES", "1")
     monkeypatch.setattr(auth, "load_from_env", lambda: None)
     extracted = iter(
         [
@@ -180,7 +179,7 @@ def test_verify_cookies_logs_attempt_summary_on_non_auth_failures(monkeypatch, c
                 return Response(404)
             raise Exception("network")
 
-    monkeypatch.setattr("twitter_cli.client._get_cffi_session", lambda: Session())
+    monkeypatch.setattr("twitter_cli.client._get_wreq_session", lambda: Session())
 
     with caplog.at_level("INFO"):
         result = auth.verify_cookies("token", "csrf")

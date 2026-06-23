@@ -18,7 +18,7 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from .constants import BEARER_TOKEN, get_user_agent
+from .constants import BEARER_TOKEN
 from .exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
@@ -100,11 +100,11 @@ def load_from_env() -> Optional[Dict[str, str]]:
 def verify_cookies(auth_token: str, ct0: str, cookie_string: Optional[str] = None) -> Dict[str, Any]:
     """Verify cookies by calling a Twitter API endpoint.
 
-    Uses curl_cffi for proper TLS fingerprint.
+    Uses wreq for proper TLS fingerprint.
     Tries multiple endpoints. Only raises on clear auth failures (401/403).
     For other errors (404, network), returns empty dict (proceed without verification).
     """
-    from .client import _get_cffi_session
+    from .client import _get_wreq_session
 
     urls = [
         "https://api.x.com/1.1/account/verify_credentials.json",
@@ -120,11 +120,10 @@ def verify_cookies(auth_token: str, ct0: str, cookie_string: Optional[str] = Non
         "X-Csrf-Token": ct0,
         "X-Twitter-Active-User": "yes",
         "X-Twitter-Auth-Type": "OAuth2Session",
-        "User-Agent": get_user_agent(),
     }
 
-    # Reuse the shared curl_cffi session for consistent TLS fingerprint
-    session = _get_cffi_session()
+    # Reuse the shared wreq session for consistent TLS fingerprint
+    session = _get_wreq_session()
     attempts = []
 
     logger.debug(
@@ -163,7 +162,11 @@ def verify_cookies(auth_token: str, ct0: str, cookie_string: Optional[str] = Non
     return {}
 
 
-def _extract_cookies_from_jar(jar: Any, source: str = "unknown") -> Optional[Dict[str, str]]:
+def _extract_cookies_from_jar(
+    jar: Any,
+    source: str = "unknown",
+    log_missing: bool = True,
+) -> Optional[Dict[str, str]]:
     """Extract Twitter cookies from a cookie jar."""
     result: Dict[str, str] = {}
     all_cookies: Dict[str, str] = {}
@@ -184,13 +187,14 @@ def _extract_cookies_from_jar(jar: Any, source: str = "unknown") -> Optional[Dic
             cookies["cookie_string"] = "; ".join("%s=%s" % (k, v) for k, v in all_cookies.items())
             logger.info("Extracted %d total cookies for full browser fingerprint", len(all_cookies))
         return cookies
-    logger.debug(
-        "Cookie jar %s did not contain usable Twitter auth cookies (twitter_cookies=%d, auth_token=%s, ct0=%s)",
-        source,
-        twitter_cookie_count,
-        "auth_token" in result,
-        "ct0" in result,
-    )
+    if log_missing:
+        logger.debug(
+            "Cookie jar %s did not contain usable Twitter auth cookies (twitter_cookies=%d, auth_token=%s, ct0=%s)",
+            source,
+            twitter_cookie_count,
+            "auth_token" in result,
+            "ct0" in result,
+        )
     return None
 
 
@@ -306,11 +310,10 @@ def _extract_in_process() -> Tuple[Optional[Dict[str, str]], List[str]]:
                 try:
                     jar = fn()
                 except Exception as e:
-                    logger.debug("%s in-process extraction failed: %s", name, e)
                     attempts.append("%s=%s" % (name, type(e).__name__))
                     diagnostics.append("%s: %s" % (name, e))
                     continue
-                cookies = _extract_cookies_from_jar(jar, source="%s(in-process)" % name)
+                cookies = _extract_cookies_from_jar(jar, source="%s(in-process)" % name, log_missing=False)
                 if cookies:
                     logger.info("Found cookies in %s (in-process, default)", name)
                     return cookies, diagnostics
@@ -322,11 +325,14 @@ def _extract_in_process() -> Tuple[Optional[Dict[str, str]], List[str]]:
                 try:
                     jar = fn(cookie_file=cookie_file)
                 except Exception as e:
-                    logger.debug("%s[%s] in-process extraction failed: %s", name, profile_name, e)
                     attempts.append("%s[%s]=%s" % (name, profile_name, type(e).__name__))
                     diagnostics.append("%s[%s]: %s" % (name, profile_name, e))
                     continue
-                cookies = _extract_cookies_from_jar(jar, source="%s[%s](in-process)" % (name, profile_name))
+                cookies = _extract_cookies_from_jar(
+                    jar,
+                    source="%s[%s](in-process)" % (name, profile_name),
+                    log_missing=False,
+                )
                 if cookies:
                     logger.info("Found cookies in %s profile '%s' (in-process)", name, profile_name)
                     return cookies, diagnostics
@@ -336,11 +342,10 @@ def _extract_in_process() -> Tuple[Optional[Dict[str, str]], List[str]]:
             try:
                 jar = fn()
             except Exception as e:
-                logger.debug("%s in-process extraction failed: %s", name, e)
                 attempts.append("%s=%s" % (name, type(e).__name__))
                 diagnostics.append("%s: %s" % (name, e))
                 continue
-            cookies = _extract_cookies_from_jar(jar, source="%s(in-process)" % name)
+            cookies = _extract_cookies_from_jar(jar, source="%s(in-process)" % name, log_missing=False)
             if cookies:
                 logger.info("Found cookies in %s (in-process)", name)
                 return cookies, diagnostics
@@ -598,11 +603,11 @@ def get_cookies() -> Dict[str, str]:
     cookies = load_from_env()
     if cookies:
         logger.info("Loaded cookies from environment variables")
+        return cookies
 
     # 2. Try browser extraction (auto-detect)
-    if not cookies:
-        logger.debug("Attempting browser cookie extraction")
-        cookies, diagnostics = extract_from_browser()
+    logger.debug("Attempting browser cookie extraction")
+    cookies, diagnostics = extract_from_browser()
 
     if not cookies:
         lines = ["No Twitter cookies found."]
@@ -619,7 +624,12 @@ def get_cookies() -> Dict[str, str]:
         lines.append("Run 'twitter -v <command>' for debug diagnostics.")
         raise AuthenticationError("\n".join(lines))
 
-    # Verify only for explicit auth failures; transient endpoint issues are tolerated.
+    if os.environ.get("TWITTER_VERIFY_COOKIES") != "1":
+        return cookies
+
+    # Optional preflight verification. This is disabled by default because the
+    # legacy verification endpoints can return inconclusive 404/403 responses
+    # even when the GraphQL write path succeeds.
     try:
         verify_cookies(cookies["auth_token"], cookies["ct0"], cookies.get("cookie_string"))
     except RuntimeError:

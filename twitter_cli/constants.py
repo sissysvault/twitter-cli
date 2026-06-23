@@ -14,14 +14,14 @@ _DEFAULT_CHROME_VERSION = "133"
 _chrome_version = _DEFAULT_CHROME_VERSION  # mutable, set by sync_chrome_version()
 
 
-def sync_chrome_version(impersonate_target):
+def sync_chrome_version(emulation_target):
     # type: (str) -> None
-    """Sync USER_AGENT / SEC_CH_UA with the actual impersonate target.
+    """Sync USER_AGENT / SEC_CH_UA with the actual emulation target.
 
-    Called once when _get_cffi_session() picks a target (e.g. "chrome136").
+    Called once when _get_wreq_session() picks a target (e.g. "chrome136").
     """
     global _chrome_version
-    match = re.search(r"(\d+)", impersonate_target)
+    match = re.search(r"(\d+)", emulation_target)
     if match:
         _chrome_version = match.group(1)
 
@@ -43,7 +43,7 @@ def get_user_agent():
 
 def get_sec_ch_ua():
     # type: () -> str
-    return '"Chromium";v="%s", "Not(A:Brand";v="99", "Google Chrome";v="%s"' % (
+    return '"Google Chrome";v="%s", "Chromium";v="%s", "Not)A;Brand";v="24"' % (
         _chrome_version, _chrome_version,
     )
 
@@ -69,6 +69,8 @@ def _get_locale_tag():
         or "en_US.UTF-8"
     )
     tag = raw.split(".", 1)[0].replace("_", "-")
+    if not tag or tag.upper() in {"C", "POSIX"}:
+        return "en-US"
     return tag or "en-US"
 
 
@@ -76,7 +78,9 @@ def get_accept_language():
     # type: () -> str
     tag = _get_locale_tag()
     language = tag.split("-", 1)[0] or "en"
-    return "%s,%s;q=0.9,en;q=0.8" % (tag, language)
+    if language == tag:
+        return "%s,en;q=0.9" % tag
+    return "%s,%s;q=0.9" % (tag, language)
 
 
 def get_twitter_client_language():

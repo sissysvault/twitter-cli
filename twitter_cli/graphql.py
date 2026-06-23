@@ -38,7 +38,7 @@ FALLBACK_QUERY_IDS = {
     "ListLatestTweetsTimeline": "RlZzktZY_9wJynoepm8ZsA",
     "Followers": "IOh4aS6UdGWGJUYTqliQ7Q",
     "Following": "zx6e-TLzRkeDO_a7p4b3JQ",
-    "CreateTweet": "IID9x6WsdMnTlXnzXGq8ng",
+    "CreateTweet": "R5EPiGHgSqbTYFyozd-gFw",
     "DeleteTweet": "VaenaVgh5q5ih7kvyVjgtg",
     "FavoriteTweet": "lI07N6Otwv1PhnEgXILM7A",
     "UnfavoriteTweet": "ZYKSe-w7KEslx3JhSIk5LA",
@@ -118,8 +118,7 @@ def _scan_bundles(url_fetch_fn):
     _bundles_scanned = True
 
     try:
-        from .constants import get_user_agent
-        html = url_fetch_fn("https://x.com", {"user-agent": get_user_agent()})
+        html = url_fetch_fn("https://x.com")
         script_pattern = re.compile(
             r'(?:src|href)=["\']'
             r'(https://abs\.twimg\.com/responsive-web/client-web[^"\']+'

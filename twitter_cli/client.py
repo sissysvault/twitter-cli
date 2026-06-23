@@ -3,36 +3,29 @@
 from __future__ import annotations
 
 import base64
+import datetime
+import hashlib
 import json
 import logging
 import math
 import mimetypes
 import os
 import random
+import re
 import time
 import urllib.parse
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 import bs4
-from curl_cffi import requests as _cffi_requests
+from wreq import Multipart, Part, Proxy
+from wreq.blocking import Client as _WreqClient
+from wreq.emulation import Emulation, Platform, Profile
 from x_client_transaction import ClientTransaction
-from x_client_transaction.utils import generate_headers as _gen_ct_headers, get_ondemand_file_url
+from x_client_transaction.utils import get_ondemand_file_url
 
 from .constants import (
     BEARER_TOKEN,
-    SEC_CH_UA_BITNESS,
-    SEC_CH_UA_MOBILE,
-    SEC_CH_UA_MODEL,
-    get_accept_language,
-    get_sec_ch_ua_arch,
-    get_sec_ch_ua,
-    get_sec_ch_ua_full_version,
-    get_sec_ch_ua_full_version_list,
-    get_sec_ch_ua_platform,
-    get_sec_ch_ua_platform_version,
     get_twitter_client_language,
-    get_user_agent,
-    sync_chrome_version,
 )
 from .exceptions import (
     MediaUploadError,
@@ -63,68 +56,219 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Shared curl_cffi session (single-threaded CLI)
-_cffi_session = None
+# Shared wreq session (single-threaded CLI)
+_wreq_session = None
 
 TimelineInstructionGetter = Callable[[Any], Any]
 
 # Hard ceiling to prevent accidental massive fetches
 _ABSOLUTE_MAX_COUNT = 500
 
+_CREATE_TWEET_FEATURES = {
+    "articles_preview_enabled": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "content_disclosure_ai_generated_indicator_enabled": True,
+    "content_disclosure_indicator_enabled": True,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "longform_notetweets_inline_media_enabled": False,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "post_ctas_fetch_enabled": False,
+    "premium_content_api_read_enabled": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "responsive_web_grok_annotations_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+    "responsive_web_jetfuel_frame": True,
+    "responsive_web_profile_redirect_enabled": False,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "rweb_cashtags_composer_attachment_enabled": True,
+    "rweb_cashtags_enabled": True,
+    "rweb_conversational_replies_downvote_enabled": False,
+    "rweb_tipjar_consumption_enabled": False,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "verified_phone_label_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+}
+
 
 # ── Session management ───────────────────────────────────────────────────
 
 
+class _WreqResponseCompat:
+    """Small requests-shaped facade for wreq blocking responses."""
+
+    def __init__(self, response):
+        # type: (Any) -> None
+        self._response = response
+
+    @property
+    def status_code(self):
+        # type: () -> int
+        status = self._response.status
+        if hasattr(status, "as_int"):
+            return int(status.as_int())
+        return int(status)
+
+    @property
+    def text(self):
+        # type: () -> str
+        return self._response.text()
+
+    @property
+    def content(self):
+        # type: () -> bytes
+        return self._response.bytes()
+
+    def json(self):
+        # type: () -> Any
+        return self._response.json()
+
+    def raise_for_status(self):
+        # type: () -> None
+        self._response.raise_for_status()
+
+
+class _WreqSessionCompat:
+    """Minimal session facade for the subset of requests used by twitter-cli."""
+
+    def __init__(self, client):
+        # type: (Any) -> None
+        self._client = client
+
+    @staticmethod
+    def _timeout(value):
+        # type: (Any) -> Any
+        if isinstance(value, (int, float)):
+            return datetime.timedelta(seconds=float(value))
+        return value
+
+    def get(self, url, headers=None, timeout=None, **kwargs):
+        request_kwargs = dict(kwargs)
+        if headers is not None:
+            request_kwargs["headers"] = headers
+        if timeout is not None:
+            request_kwargs["timeout"] = self._timeout(timeout)
+        return _WreqResponseCompat(self._client.get(url, **request_kwargs))
+
+    def post(self, url, headers=None, data=None, json=None, timeout=None, **kwargs):
+        request_kwargs = dict(kwargs)
+        if headers is not None:
+            request_kwargs["headers"] = headers
+        if data is not None:
+            request_kwargs["form"] = data
+        if json is not None:
+            request_kwargs["json"] = json
+        if timeout is not None:
+            request_kwargs["timeout"] = self._timeout(timeout)
+        return _WreqResponseCompat(self._client.post(url, **request_kwargs))
+
+
 def _best_chrome_target():
     # type: () -> str
-    """Detect the best available Chrome impersonation target at runtime.
+    """Detect the best available Chrome emulation target at runtime.
 
-    curl_cffi versions differ in which Chrome targets they ship.
-    e.g. 0.14.0 has chrome133a but not chrome133.
+    wreq versions differ in which Chrome profiles they ship.
     """
-    try:
-        from curl_cffi.requests import BrowserType
-        available = {e.value for e in BrowserType}
-    except ImportError:
-        # curl_cffi not installed or BrowserType not available
-        logger.debug("curl_cffi.BrowserType not available, using fallback targets")
-        available = set()
-
-    # Preference order: exact chrome versions, then suffixed variants
-    for target in ("chrome133", "chrome133a", "chrome136", "chrome131", "chrome130"):
-        if target in available:
-            return target
-    # Fallback: pick highest chrome* with a pure numeric suffix
     chrome_targets = sorted(
-        [v for v in available if v.startswith("chrome") and v.replace("chrome", "").isdigit()],
-        key=lambda x: int(x.replace("chrome", "")),
+        [
+            name for name in dir(Profile)
+            if name.startswith("Chrome") and name.replace("Chrome", "").isdigit()
+        ],
+        key=lambda name: int(name.replace("Chrome", "")),
         reverse=True,
     )
-    return chrome_targets[0] if chrome_targets else "chrome131"
+    return chrome_targets[0].lower() if chrome_targets else "chrome131"
 
 
-def _get_cffi_session():
+def _chrome_emulation_for_target(target):
+    # type: (str) -> Any
+    profile_name = "Chrome%s" % "".join(ch for ch in target if ch.isdigit())
+    profile = getattr(Profile, profile_name, Profile.Chrome131)
+    return Emulation(profile=profile, platform=Platform.Android, headers=True)
+
+
+def _is_upload_url(url):
+    # type: (str) -> bool
+    return urllib.parse.urlparse(url).netloc == "upload.x.com"
+
+
+def _referer_for_url(url, method):
+    # type: (str, str) -> str
+    path = urllib.parse.urlparse(url).path
+    if _is_upload_url(url):
+        return "https://x.com/"
+    if method == "POST" and path.startswith("/i/api/graphql/"):
+        return "https://x.com/home"
+    return "https://x.com/"
+
+
+def _sec_fetch_site_for_url(url):
+    # type: (str) -> str
+    return "same-site" if _is_upload_url(url) else "same-origin"
+
+
+def _redact_proxy_url(proxy):
+    # type: (str) -> str
+    parsed = urllib.parse.urlsplit(proxy)
+    if not parsed.hostname:
+        return "<configured>"
+    host = parsed.hostname
+    if parsed.port:
+        host = "%s:%d" % (host, parsed.port)
+    return urllib.parse.urlunsplit((parsed.scheme, host, "", "", ""))
+
+
+def _fallback_ondemand_file_url(home_html):
+    # type: (str) -> Optional[str]
+    """Extract ondemand.s URL from current X webpack chunk maps."""
+    chunk_match = re.search(r'(\d+):"ondemand\.s"', home_html)
+    if not chunk_match:
+        return None
+
+    chunk_id = chunk_match.group(1)
+    for value_match in re.finditer(r'%s:"([^"]+)"' % re.escape(chunk_id), home_html):
+        value = value_match.group(1)
+        if value == "ondemand.s" or not re.fullmatch(r"[\w-]+", value):
+            continue
+        return "https://abs.twimg.com/responsive-web/client-web/ondemand.s.%sa.js" % value
+    return None
+
+
+def _get_wreq_session():
     # type: () -> Any
-    """Return shared curl_cffi session with Chrome impersonation and optional proxy."""
-    global _cffi_session
-    if _cffi_session is None:
+    """Return shared wreq session with Chrome emulation and optional proxy."""
+    global _wreq_session
+    if _wreq_session is None:
         proxy = os.environ.get("TWITTER_PROXY", "")
         target = _best_chrome_target()
-        sync_chrome_version(target)  # align UA/sec-ch-ua with impersonate target
-        _cffi_session = _cffi_requests.Session(
-            impersonate=cast(Any, target),
-            proxies={"https": proxy, "http": proxy} if proxy else None,
+        client = _WreqClient(
+            emulation=cast(Any, _chrome_emulation_for_target(target)),
+            proxies=[Proxy.all(proxy)] if proxy else None,
         )
-        logger.info("curl_cffi impersonating %s", target)
+        _wreq_session = _WreqSessionCompat(client)
+        logger.info("wreq emulating %s on android", target)
         if proxy:
-            logger.info("Using proxy: %s", proxy[:20] + "...")
-    return _cffi_session
+            logger.info("Using proxy: %s", _redact_proxy_url(proxy))
+    return _wreq_session
 
 
 def _url_fetch(url, headers=None):
     # type: (str, Optional[Dict[str, str]]) -> str
-    """URL fetch using curl_cffi for proper TLS fingerprint."""
-    session = _get_cffi_session()
+    """URL fetch using wreq for proper TLS fingerprint."""
+    session = _get_wreq_session()
     resp = session.get(url, headers=headers or {}, timeout=30)
     resp.raise_for_status()
     return resp.text
@@ -470,9 +614,12 @@ class TwitterClient:
 
     # ── Write operations ─────────────────────────────────────────────
 
-    # Supported image MIME types and max file size (5 MB)
+    # Supported media MIME types and size limits.
     _SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    _SUPPORTED_VIDEO_TYPES = {"video/mp4"}
     _MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+    _MAX_VIDEO_SIZE = 512 * 1024 * 1024
+    _VIDEO_CHUNK_SIZE = 8 * 1024 * 1024
 
     def _write_delay(self):
         # type: () -> None
@@ -483,31 +630,42 @@ class TwitterClient:
 
     def upload_media(self, file_path):
         # type: (str) -> str
-        """Upload an image file to Twitter.  Returns the media_id string.
+        """Upload an image or video file to Twitter.  Returns the media_id string.
 
-        Uses Twitter's chunked upload API (INIT → APPEND → FINALIZE).
-        Supports JPEG, PNG, GIF, and WebP images up to 5 MB.
+        Images use the legacy small-media APPEND flow. Videos use the current
+        browser-style APPENDMULTI multipart flow with async STATUS polling.
         """
         if not os.path.isfile(file_path):
             raise MediaUploadError("File not found: %s" % file_path)
 
         file_size = os.path.getsize(file_path)
-        if file_size > self._MAX_IMAGE_SIZE:
-            raise MediaUploadError(
-                "File too large: %.1f MB (max %.0f MB)"
-                % (file_size / (1024 * 1024), self._MAX_IMAGE_SIZE / (1024 * 1024))
-            )
-
         media_type = mimetypes.guess_type(file_path)[0] or ""
-        if media_type not in self._SUPPORTED_IMAGE_TYPES:
-            raise MediaUploadError(
-                "Unsupported image format: %s (supported: jpeg, png, gif, webp)" % media_type
-            )
 
-        upload_url = "https://upload.twitter.com/i/media/upload.json"
-        session = _get_cffi_session()
+        if media_type in self._SUPPORTED_IMAGE_TYPES:
+            if file_size > self._MAX_IMAGE_SIZE:
+                raise MediaUploadError(
+                    "Image file too large: %.1f MB (max %.0f MB)"
+                    % (file_size / (1024 * 1024), self._MAX_IMAGE_SIZE / (1024 * 1024))
+                )
+            return self._upload_image_media(file_path, file_size, media_type)
 
-        # ── INIT ─────────────────────────────────────────────────────
+        if media_type in self._SUPPORTED_VIDEO_TYPES:
+            if file_size > self._MAX_VIDEO_SIZE:
+                raise MediaUploadError(
+                    "Video file too large: %.1f MB (max %.0f MB)"
+                    % (file_size / (1024 * 1024), self._MAX_VIDEO_SIZE / (1024 * 1024))
+                )
+            return self._upload_video_media(file_path, file_size, media_type)
+
+        raise MediaUploadError(
+            "Unsupported media format: %s (supported: jpeg, png, gif, webp, mp4)" % media_type
+        )
+
+    def _upload_image_media(self, file_path, file_size, media_type):
+        # type: (str, int, str) -> str
+        upload_url = "https://upload.x.com/i/media/upload.json"
+        session = _get_wreq_session()
+
         headers = self._build_headers(url=upload_url, method="POST")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         init_data = {
@@ -527,12 +685,10 @@ class TwitterClient:
             raise MediaUploadError("INIT did not return media_id")
         logger.info("Media INIT: media_id=%s", media_id)
 
-        # ── APPEND ───────────────────────────────────────────────────
         with open(file_path, "rb") as f:
             media_data = base64.b64encode(f.read()).decode("ascii")
 
         headers = self._build_headers(url=upload_url, method="POST")
-        # Remove JSON content-type — curl_cffi handles multipart encoding
         headers.pop("Content-Type", None)
         append_data = {
             "command": "APPEND",
@@ -545,7 +701,6 @@ class TwitterClient:
             raise MediaUploadError("APPEND failed (HTTP %d): %s" % (resp.status_code, resp.text[:300]))
         logger.info("Media APPEND: segment 0 uploaded")
 
-        # ── FINALIZE ─────────────────────────────────────────────────
         headers = self._build_headers(url=upload_url, method="POST")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         finalize_data = {
@@ -558,6 +713,121 @@ class TwitterClient:
         logger.info("Media FINALIZE: media_id=%s ready", media_id)
 
         return media_id
+
+    def _upload_video_media(self, file_path, file_size, media_type):
+        # type: (str, int, str) -> str
+        upload_url = "https://upload.x.com/i/media/upload.json"
+        session = _get_wreq_session()
+
+        headers = self._build_headers(url=upload_url, method="POST")
+        headers.pop("Content-Type", None)
+        init_query = {
+            "command": "INIT",
+            "total_bytes": str(file_size),
+            "media_type": media_type,
+            "media_category": "amplify_video",
+        }
+        resp = session.post(upload_url, headers=headers, query=init_query, timeout=30)
+        if resp.status_code >= 400:
+            raise MediaUploadError("INIT failed (HTTP %d): %s" % (resp.status_code, resp.text[:300]))
+        try:
+            init_result = json.loads(resp.text)
+        except (json.JSONDecodeError, ValueError):
+            raise MediaUploadError("INIT returned invalid JSON")
+        media_id = init_result.get("media_id_string") or str(init_result.get("media_id", ""))
+        if not media_id:
+            raise MediaUploadError("INIT did not return media_id")
+        logger.info("Video INIT: media_id=%s", media_id)
+
+        with open(file_path, "rb") as f:
+            segment_index = 0
+            while True:
+                chunk = f.read(self._VIDEO_CHUNK_SIZE)
+                if not chunk:
+                    break
+                append_query = {
+                    "command": "APPENDMULTI",
+                    "media_id": media_id,
+                    "segment_indexes": str(segment_index),
+                    "max_segment_size": str(len(chunk)),
+                    "media_md5": hashlib.md5(chunk).hexdigest(),
+                }
+                headers = self._build_headers(url=upload_url, method="POST")
+                headers.pop("Content-Type", None)
+                multipart = Multipart(
+                    Part(
+                        "media",
+                        chunk,
+                        filename="blob",
+                        mime="application/octet-stream",
+                    )
+                )
+                resp = session.post(
+                    upload_url,
+                    headers=headers,
+                    query=append_query,
+                    multipart=multipart,
+                    timeout=120,
+                )
+                if resp.status_code >= 400:
+                    raise MediaUploadError(
+                        "APPENDMULTI segment %d failed (HTTP %d): %s"
+                        % (segment_index, resp.status_code, resp.text[:300])
+                    )
+                logger.info("Video APPENDMULTI: segment %d uploaded", segment_index)
+                segment_index += 1
+
+        headers = self._build_headers(url=upload_url, method="POST")
+        headers.pop("Content-Type", None)
+        finalize_query = {
+            "command": "FINALIZE",
+            "media_id": media_id,
+            "allow_async": "true",
+        }
+        resp = session.post(upload_url, headers=headers, query=finalize_query, timeout=30)
+        if resp.status_code >= 400:
+            raise MediaUploadError("FINALIZE failed (HTTP %d): %s" % (resp.status_code, resp.text[:300]))
+        try:
+            finalize_result = json.loads(resp.text or "{}")
+        except (json.JSONDecodeError, ValueError):
+            raise MediaUploadError(
+                "FINALIZE returned invalid JSON"
+            )
+        self._wait_for_video_processing(session, upload_url, media_id, finalize_result)
+        logger.info("Video FINALIZE: media_id=%s ready", media_id)
+        return media_id
+
+    def _wait_for_video_processing(self, session, upload_url, media_id, finalize_result):
+        # type: (Any, str, str, Dict[str, Any]) -> None
+        processing_info = finalize_result.get("processing_info") if isinstance(finalize_result, dict) else None
+        if not processing_info:
+            return
+
+        for _ in range(60):
+            state = processing_info.get("state")
+            if state == "succeeded":
+                return
+            if state == "failed":
+                error = processing_info.get("error") or {}
+                message = error.get("message") or error.get("name") or "unknown processing error"
+                raise MediaUploadError("Video processing failed: %s" % message)
+            wait = float(processing_info.get("check_after_secs") or 2)
+            time.sleep(min(max(wait, 1.0), 10.0))
+            headers = self._build_headers(url=upload_url, method="GET")
+            status_query = {
+                "command": "STATUS",
+                "media_id": media_id,
+            }
+            resp = session.get(upload_url, headers=headers, query=status_query, timeout=30)
+            if resp.status_code >= 400:
+                raise MediaUploadError("STATUS failed (HTTP %d): %s" % (resp.status_code, resp.text[:300]))
+            try:
+                status_result = json.loads(resp.text)
+            except (json.JSONDecodeError, ValueError):
+                raise MediaUploadError("STATUS returned invalid JSON")
+            processing_info = status_result.get("processing_info") or {}
+
+        raise MediaUploadError("Video processing timed out")
 
     def create_tweet(self, text, reply_to_id=None, media_ids=None):
         # type: (str, Optional[str], Optional[List[str]]) -> str
@@ -575,19 +845,17 @@ class TwitterClient:
             "tweet_text": text,
             "media": {"media_entities": media_entities, "possibly_sensitive": False},
             "semantic_annotation_ids": [],
-            "dark_request": False,
+            "disallowed_reply_options": None,
+            "semantic_annotation_options": None,
         }  # type: Dict[str, Any]
         if reply_to_id:
             variables["reply"] = {
                 "in_reply_to_tweet_id": reply_to_id,
                 "exclude_reply_user_ids": [],
             }
-        data = self._graphql_post("CreateTweet", variables, FEATURES)
+        data = self._graphql_post("CreateTweet", variables, _CREATE_TWEET_FEATURES)
         self._write_delay()
-        result = _deep_get(data, "data", "create_tweet", "tweet_results", "result")
-        if result:
-            return result.get("rest_id", "")
-        raise TwitterAPIError(0, "Failed to create tweet")
+        return self._extract_created_tweet_id(data)
 
     def delete_tweet(self, tweet_id):
         # type: (str) -> bool
@@ -710,23 +978,21 @@ class TwitterClient:
             "attachment_url": "https://x.com/i/status/%s" % tweet_id,
             "media": {"media_entities": media_entities, "possibly_sensitive": False},
             "semantic_annotation_ids": [],
-            "dark_request": False,
+            "disallowed_reply_options": None,
+            "semantic_annotation_options": None,
         }
-        data = self._graphql_post("CreateTweet", variables, FEATURES)
+        data = self._graphql_post("CreateTweet", variables, _CREATE_TWEET_FEATURES)
         self._write_delay()
-        result = _deep_get(data, "data", "create_tweet", "tweet_results", "result")
-        if result:
-            return result.get("rest_id", "")
-        raise TwitterAPIError(0, "Failed to create quote tweet")
+        return self._extract_created_tweet_id(data)
 
     def follow_user(self, user_id):
         # type: (str) -> bool
         """Follow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/create.json"
         body = {"user_id": user_id, "include_profile_interstitial_type": "1"}
+        session = _get_wreq_session()
         headers = self._build_headers(url=url, method="POST")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        session = _get_cffi_session()
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
             raise TwitterAPIError(response.status_code, "Failed to follow user")
@@ -738,14 +1004,34 @@ class TwitterClient:
         """Unfollow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/destroy.json"
         body = {"user_id": user_id, "include_profile_interstitial_type": "1"}
+        session = _get_wreq_session()
         headers = self._build_headers(url=url, method="POST")
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        session = _get_cffi_session()
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
             raise TwitterAPIError(response.status_code, "Failed to unfollow user")
         self._write_delay()
         return True
+
+    @staticmethod
+    def _extract_created_tweet_id(data):
+        # type: (Dict[str, Any]) -> str
+        result = _deep_get(data, "data", "create_tweet", "tweet_results", "result")
+        if isinstance(result, dict) and result.get("rest_id"):
+            return str(result["rest_id"])
+
+        create_tweet = _deep_get(data, "data", "create_tweet")
+        if isinstance(create_tweet, dict):
+            logger.debug("CreateTweet response shape: %s", json.dumps(create_tweet, sort_keys=True)[:1000])
+            keys = ", ".join(sorted(str(key) for key in create_tweet.keys()))
+            raise TwitterAPIError(0, "Failed to create tweet: missing tweet result (create_tweet keys: %s)" % keys)
+
+        if isinstance(data, dict):
+            logger.debug("CreateTweet response top-level shape: %s", json.dumps(data, sort_keys=True)[:1000])
+            keys = ", ".join(sorted(str(key) for key in data.keys()))
+            raise TwitterAPIError(0, "Failed to create tweet: missing create_tweet data (top-level keys: %s)" % keys)
+
+        raise TwitterAPIError(0, "Failed to create tweet: unexpected response type %s" % type(data).__name__)
 
     # ── Internal: timeline / user list fetchers ──────────────────────
 
@@ -950,12 +1236,12 @@ class TwitterClient:
         # type: (str, str, Optional[Dict[str, Any]]) -> Dict[str, Any]
         """Make authenticated request to Twitter API with retry on rate limits.
 
-        Uses curl_cffi for Chrome TLS/JA3/HTTP2 fingerprint impersonation.
+        Uses wreq for Chrome TLS/JA3/HTTP2 fingerprint emulation.
         Handles both GET and POST. Retries on HTTP 429 and JSON error code 88.
         """
+        session = _get_wreq_session()
         headers = self._build_headers(url=url, method=method)
-        session = _get_cffi_session()
-        json_body = body  # curl_cffi handles JSON serialization
+        json_body = body  # wreq handles JSON serialization
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -1098,19 +1384,26 @@ class TwitterClient:
             return
 
         try:
-            # Use curl_cffi for ClientTransaction init to maintain consistent
+            # Use wreq for ClientTransaction init to maintain consistent
             # Chrome TLS fingerprint. Using Python requests here would leak
             # a different TLS fingerprint on the same IP — a detection vector.
-            cffi_session = _get_cffi_session()
-            ct_headers = _gen_ct_headers()
-            home_page = cffi_session.get(
-                "https://x.com", headers=ct_headers, timeout=10,
+            wreq_session = _get_wreq_session()
+            ct_headers = {
+                "Cookie": self._cookie_string or "auth_token=%s; ct0=%s" % (self._auth_token, self._ct0),
+                "Referer": "https://x.com/home",
+            }
+            home_page = wreq_session.get(
+                "https://x.com/home", headers=ct_headers, timeout=10,
             )
             home_page_response = bs4.BeautifulSoup(home_page.content, "html.parser")
-            ondemand_url = get_ondemand_file_url(response=home_page_response)
+            ondemand_url = (
+                get_ondemand_file_url(response=home_page_response)
+                or _fallback_ondemand_file_url(home_page.text)
+            )
             if not ondemand_url:
-                raise ValueError("Failed to extract ondemand file URL from homepage")
-            ondemand_file = cffi_session.get(
+                logger.debug("ClientTransaction unavailable: failed to extract ondemand file URL")
+                return
+            ondemand_file = wreq_session.get(
                 ondemand_url, headers=ct_headers, timeout=10,
             )
             self._client_transaction = ClientTransaction(
@@ -1130,6 +1423,7 @@ class TwitterClient:
     def _build_headers(self, url="", method="GET"):
         # type: (str, str) -> Dict[str, str]
         """Build shared headers for authenticated API calls."""
+        method = method.upper()
         headers = {
             "Authorization": "Bearer %s" % BEARER_TOKEN,
             "Cookie": self._cookie_string or "auth_token=%s; ct0=%s" % (self._auth_token, self._ct0),
@@ -1137,27 +1431,15 @@ class TwitterClient:
             "X-Twitter-Active-User": "yes",
             "X-Twitter-Auth-Type": "OAuth2Session",
             "X-Twitter-Client-Language": get_twitter_client_language(),
-            "User-Agent": get_user_agent(),
             "Origin": "https://x.com",
-            "Referer": "https://x.com/",
+            "Referer": _referer_for_url(url, method),
             "Accept": "*/*",
-            "Accept-Language": get_accept_language(),
-            "sec-ch-ua": get_sec_ch_ua(),
-            "sec-ch-ua-mobile": SEC_CH_UA_MOBILE,
-            "sec-ch-ua-platform": get_sec_ch_ua_platform(),
-            "sec-ch-ua-arch": get_sec_ch_ua_arch(),
-            "sec-ch-ua-bitness": SEC_CH_UA_BITNESS,
-            "sec-ch-ua-full-version": get_sec_ch_ua_full_version(),
-            "sec-ch-ua-full-version-list": get_sec_ch_ua_full_version_list(),
-            "sec-ch-ua-model": SEC_CH_UA_MODEL,
-            "sec-ch-ua-platform-version": get_sec_ch_ua_platform_version(),
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Site": _sec_fetch_site_for_url(url),
         }
         if method == "POST":
             headers["Content-Type"] = "application/json"
-            headers["Referer"] = "https://x.com/compose/post"
             headers["Priority"] = "u=1, i"
         # Generate x-client-transaction-id if available
         if self._client_transaction and url:

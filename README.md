@@ -35,8 +35,8 @@ A terminal-first CLI for Twitter/X: read timelines, bookmarks, and user profiles
 > **AI Agent Tip:** Prefer `--yaml` for structured output unless a strict JSON parser is required. Non-TTY stdout defaults to YAML automatically. Use `--max` to limit results.
 
 **Write:**
-- Post: create new tweets and replies, with optional image attachments (up to 4)
-- Quote: quote-tweet with optional images
+- Post: create new tweets and replies, with optional image attachments (up to 4) or one MP4 video
+- Quote: quote-tweet with optional images or one MP4 video
 - Delete: remove your own tweets
 - Like / Unlike: manage tweet likes
 - Retweet / Unretweet: manage retweets
@@ -46,7 +46,7 @@ A terminal-first CLI for Twitter/X: read timelines, bookmarks, and user profiles
 **Auth & Anti-Detection:**
 - Cookie auth: use browser cookies or environment variables
 - Full cookie forwarding: extracts ALL browser cookies for richer browser context
-- TLS fingerprint impersonation: `curl_cffi` with dynamic Chrome version matching
+- TLS fingerprint impersonation: `wreq` with dynamic Chrome version matching
 - `x-client-transaction-id` header generation
 - Request timing jitter to avoid pattern detection
 - Write operation delays (1.5–4s random) to mitigate rate limits
@@ -154,6 +154,7 @@ twitter following elonmusk --max 50
 twitter post "Hello from twitter-cli!"
 twitter post "Hello!" --image photo.jpg            # Post with image
 twitter post "Gallery" -i a.png -i b.jpg -i c.webp  # Up to 4 images
+twitter post "Clip" --video clip.mp4               # Post with video
 twitter post "reply text" --reply-to 1234567890
 twitter reply 1234567890 "Nice!" -i screenshot.png  # Reply with image
 twitter quote 1234567890 "Look" -i chart.png        # Quote with image
@@ -399,7 +400,7 @@ git clone git@github.com:jackwener/twitter-cli.git .agents/skills/twitter-cli
 **认证与反风控:**
 - Cookie 认证：支持环境变量和浏览器自动提取
 - 完整 Cookie 转发：提取浏览器中所有 Twitter Cookie，保留更多浏览器上下文
-- TLS 指纹伪装：`curl_cffi` 动态匹配 Chrome 版本
+- TLS 指纹伪装：`wreq` 动态匹配 Chrome 版本
 - `x-client-transaction-id` 请求头生成
 - 请求时序随机化（jitter）
 - 写操作随机延迟（1.5–4 秒），降低频率风控
@@ -477,6 +478,7 @@ twitter following elonmusk
 twitter post "你好，世界！"
 twitter post "发图" --image photo.jpg              # 带图发推
 twitter post "多图" -i a.png -i b.jpg -i c.webp    # 最多 4 张图片
+twitter post "视频" --video clip.mp4               # 带视频发推
 twitter post "回复内容" --reply-to 1234567890
 twitter reply 1234567890 "回复" -i screenshot.png   # 带图回复
 twitter quote 1234567890 "评论" -i chart.png        # 带图引用
