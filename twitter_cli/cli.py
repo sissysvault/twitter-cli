@@ -21,6 +21,8 @@ Read commands:
 Write commands:
     twitter post "text"               # post a tweet
     twitter post "text" -i photo.jpg  # post with image(s)
+    twitter post "text" -v clip.mp4   # post with a video
+    twitter join-community <id>       # join a community
     twitter reply <id> "text"         # reply to a tweet
     twitter quote <id> "text"         # quote-tweet
     twitter delete <id>               # delete a tweet
@@ -217,6 +219,30 @@ def _normalize_tweet_id(value):
 
     if not candidate.isdigit():
         raise RuntimeError("Invalid tweet ID: %s" % value)
+    return candidate
+
+
+def _normalize_community_id(value):
+    # type: (str) -> str
+    """Extract a numeric community ID from raw input or a full X community URL."""
+    raw = value.strip()
+    if not raw:
+        raise RuntimeError("Community ID or URL is required")
+
+    parsed = urllib.parse.urlparse(raw)
+    candidate = raw
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path.rstrip("/")
+        match = re.search(r"/i/communities/(\d+)$", path)
+        if not match:
+            raise RuntimeError("Invalid community URL: %s" % value)
+        candidate = match.group(1)
+    else:
+        candidate = raw.rstrip("/").split("/")[-1]
+        candidate = candidate.split("?", 1)[0].split("#", 1)[0]
+
+    if not candidate.isdigit():
+        raise RuntimeError("Invalid community ID: %s" % value)
     return candidate
 
 
@@ -1122,9 +1148,15 @@ def following(screen_name, max_count, as_json, as_yaml):
 _MAX_IMAGES = 4  # Twitter allows up to 4 images per tweet
 
 
-def _upload_images(client, image_paths, rich_output=True):
-    # type: (TwitterClient, tuple, bool) -> list
-    """Upload images and return list of media_id strings."""
+def _upload_media_attachments(client, image_paths, video_path=None, rich_output=True):
+    # type: (TwitterClient, tuple, Optional[str], bool) -> list
+    """Upload image or video attachments and return media_id strings."""
+    if video_path and image_paths:
+        raise click.UsageError("Cannot attach images and video in the same tweet")
+    if video_path:
+        if rich_output:
+            console.print("📤 Uploading video: %s" % video_path)
+        return [client.upload_media(video_path)]
     if not image_paths:
         return []
     if len(image_paths) > _MAX_IMAGES:
@@ -1163,25 +1195,41 @@ def _write_action(emoji, action_desc, client_method, tweet_id, as_json=False, as
 @click.argument("text")
 @click.option("--reply-to", "-r", default=None, help="Reply to this tweet ID.")
 @click.option("--image", "-i", "images", multiple=True, type=click.Path(exists=True), help="Attach image (up to 4). Repeatable.")
+@click.option("--video", "-v", "video", type=click.Path(exists=True), default=None, help="Attach one MP4 video.")
+@click.option("--community", "-c", "community", default=None, help="Post into this community ID or URL.")
 @structured_output_options
-def post(text, reply_to, images, as_json, as_yaml):
-    # type: (str, Optional[str], tuple, bool, bool) -> None
+def post(text, reply_to, images, video, community, as_json, as_yaml):
+    # type: (str, Optional[str], tuple, Optional[str], Optional[str], bool, bool) -> None
     """Post a new tweet. TEXT is the tweet content.
 
-    Attach images with --image / -i (up to 4):
+    Attach images with --image / -i (up to 4), or one MP4 video with --video / -v:
 
     \b
       twitter post "Hello!" --image photo.jpg
       twitter post "Gallery" -i a.png -i b.png -i c.jpg
+      twitter post "Clip" --video clip.mp4
     """
     normalized_reply_to = _normalize_tweet_id(reply_to) if reply_to else None
+    normalized_community = _normalize_community_id(community) if community else None
     action = "Replying to %s" % normalized_reply_to if normalized_reply_to else "Posting tweet"
     rich_output = not _structured_mode(as_json=as_json, as_yaml=as_yaml)
 
     def operation(client: TwitterClient) -> WritePayload:
-        media_ids = _upload_images(client, images, rich_output=rich_output)
-        tweet_id = client.create_tweet(text, reply_to_id=normalized_reply_to, media_ids=media_ids or None)
-        return {"success": True, "action": "post", "id": tweet_id, "url": "https://x.com/i/status/%s" % tweet_id}
+        media_ids = _upload_media_attachments(client, images, video, rich_output=rich_output)
+        create_kwargs = {
+            "reply_to_id": normalized_reply_to,
+            "media_ids": media_ids or None,
+        }  # type: Dict[str, Any]
+        if normalized_community:
+            create_kwargs["community_id"] = normalized_community
+        tweet_id = client.create_tweet(text, **create_kwargs)
+        return {
+            "success": True,
+            "action": "post",
+            "id": tweet_id,
+            "url": "https://x.com/i/status/%s" % tweet_id,
+            "communityId": normalized_community,
+        }
 
     payload = _run_write_command(
         as_json=as_json,
@@ -1189,7 +1237,7 @@ def post(text, reply_to, images, as_json, as_yaml):
         operation=operation,
         progress_lines=["✏️  %s..." % action],
         success_lines=["[green]✅ Tweet posted![/green]"],
-        error_details={"action": "post", "replyTo": normalized_reply_to},
+        error_details={"action": "post", "replyTo": normalized_reply_to, "communityId": normalized_community},
     )
     if payload and not _structured_mode(as_json=as_json, as_yaml=as_yaml):
         console.print("🔗 %s" % payload["url"])
@@ -1199,14 +1247,15 @@ def post(text, reply_to, images, as_json, as_yaml):
 @click.argument("tweet_id")
 @click.argument("text")
 @click.option("--image", "-i", "images", multiple=True, type=click.Path(exists=True), help="Attach image (up to 4). Repeatable.")
+@click.option("--video", "-v", "video", type=click.Path(exists=True), default=None, help="Attach one MP4 video.")
 @structured_output_options
-def reply_tweet(tweet_id, text, images, as_json, as_yaml):
-    # type: (str, str, tuple, bool, bool) -> None
+def reply_tweet(tweet_id, text, images, video, as_json, as_yaml):
+    # type: (str, str, tuple, Optional[str], bool, bool) -> None
     """Reply to a tweet. TWEET_ID is the tweet to reply to, TEXT is the reply content."""
     tweet_id = _normalize_tweet_id(tweet_id)
     rich_output = not _structured_mode(as_json=as_json, as_yaml=as_yaml)
     def operation(client: TwitterClient) -> WritePayload:
-        media_ids = _upload_images(client, images, rich_output=rich_output)
+        media_ids = _upload_media_attachments(client, images, video, rich_output=rich_output)
         new_id = client.create_tweet(text, reply_to_id=tweet_id, media_ids=media_ids or None)
         return {
             "success": True,
@@ -1232,14 +1281,15 @@ def reply_tweet(tweet_id, text, images, as_json, as_yaml):
 @click.argument("tweet_id")
 @click.argument("text")
 @click.option("--image", "-i", "images", multiple=True, type=click.Path(exists=True), help="Attach image (up to 4). Repeatable.")
+@click.option("--video", "-v", "video", type=click.Path(exists=True), default=None, help="Attach one MP4 video.")
 @structured_output_options
-def quote_tweet(tweet_id, text, images, as_json, as_yaml):
-    # type: (str, str, tuple, bool, bool) -> None
+def quote_tweet(tweet_id, text, images, video, as_json, as_yaml):
+    # type: (str, str, tuple, Optional[str], bool, bool) -> None
     """Quote-tweet a tweet. TWEET_ID is the tweet to quote, TEXT is the commentary."""
     tweet_id = _normalize_tweet_id(tweet_id)
     rich_output = not _structured_mode(as_json=as_json, as_yaml=as_yaml)
     def operation(client: TwitterClient) -> WritePayload:
-        media_ids = _upload_images(client, images, rich_output=rich_output)
+        media_ids = _upload_media_attachments(client, images, video, rich_output=rich_output)
         new_id = client.quote_tweet(tweet_id, text, media_ids=media_ids or None)
         return {
             "success": True,
@@ -1351,6 +1401,28 @@ def unfollow_user(screen_name, as_json, as_yaml):
         progress_lines=["👤 Looking up @%s..." % screen_name, "➖ Unfollowing @%s..." % screen_name],
         success_lines=["[green]✅ Unfollowed @%s[/green]" % screen_name],
         error_details={"action": "unfollow", "screenName": screen_name},
+    )
+
+
+@cli.command(name="join-community")
+@click.argument("community")
+@structured_output_options
+def join_community(community, as_json, as_yaml):
+    # type: (str, bool, bool) -> None
+    """Join a community by ID or URL."""
+    community_id = _normalize_community_id(community)
+
+    def operation(client: TwitterClient) -> WritePayload:
+        client.join_community(community_id)
+        return {"success": True, "action": "join_community", "communityId": community_id}
+
+    _run_write_command(
+        as_json=as_json,
+        as_yaml=as_yaml,
+        operation=operation,
+        progress_lines=["➕ Joining community %s..." % community_id],
+        success_lines=["[green]✅ Joined community %s[/green]" % community_id],
+        error_details={"action": "join_community", "communityId": community_id},
     )
 
 

@@ -577,6 +577,93 @@ def test_cli_post_json_output(monkeypatch) -> None:
     assert payload["data"]["id"] == "999"
 
 
+def test_cli_post_video_uploads_media(monkeypatch, tmp_path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake mp4")
+    calls = []
+
+    class FakeClient:
+        def upload_media(self, path: str) -> str:
+            calls.append({"upload": path})
+            return "media-video"
+
+        def create_tweet(self, text: str, reply_to_id=None, media_ids=None) -> str:
+            calls.append({"text": text, "media_ids": media_ids})
+            return "999"
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["post", "video test", "--video", str(video), "--json"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        {"upload": str(video)},
+        {"text": "video test", "media_ids": ["media-video"]},
+    ]
+
+
+def test_cli_post_community_accepts_url(monkeypatch) -> None:
+    calls = []
+
+    class FakeClient:
+        def create_tweet(self, text: str, reply_to_id=None, media_ids=None, community_id=None) -> str:
+            calls.append(
+                {
+                    "text": text,
+                    "reply_to_id": reply_to_id,
+                    "media_ids": media_ids,
+                    "community_id": community_id,
+                }
+            )
+            return "999"
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "post",
+            "community test",
+            "--community",
+            "https://x.com/i/communities/1888295307949048263",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "text": "community test",
+            "reply_to_id": None,
+            "media_ids": None,
+            "community_id": "1888295307949048263",
+        }
+    ]
+    payload = yaml.safe_load(result.output)
+    assert payload["data"]["communityId"] == "1888295307949048263"
+
+
+def test_cli_post_rejects_mixed_image_and_video(monkeypatch, tmp_path) -> None:
+    image = tmp_path / "photo.jpg"
+    image.write_bytes(b"fake jpg")
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake mp4")
+
+    class FakeClient:
+        def upload_media(self, path: str) -> str:  # pragma: no cover
+            raise AssertionError("should not upload")
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["post", "mixed", "--image", str(image), "--video", str(video)])
+
+    assert result.exit_code != 0
+    assert "Cannot attach images and video" in result.output
+
+
 def test_cli_post_reply_to_accepts_status_url(monkeypatch) -> None:
     calls = []
 
@@ -671,6 +758,30 @@ def test_cli_unfollow_command(monkeypatch) -> None:
     result = runner.invoke(cli, ["unfollow", "alice"])
     assert result.exit_code == 0
     assert actions == [("unfollow", "42")]
+
+
+def test_cli_join_community_accepts_url(monkeypatch) -> None:
+    actions = []
+
+    class FakeClient:
+        def join_community(self, community_id: str) -> bool:
+            actions.append(community_id)
+            return True
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["join-community", "https://x.com/i/communities/1888295307949048263", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert actions == ["1888295307949048263"]
+    payload = yaml.safe_load(result.output)
+    assert payload["ok"] is True
+    assert payload["data"]["action"] == "join_community"
+    assert payload["data"]["communityId"] == "1888295307949048263"
 
 
 def test_cli_search_advanced_options(monkeypatch) -> None:

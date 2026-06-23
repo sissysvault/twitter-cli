@@ -8,7 +8,7 @@ version = "0.8.6"
 description = "A CLI for Twitter/X — feed, bookmarks, and user timeline in terminal"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "jackwener", email = "jakevingoo@gmail.com" }]
 keywords = ["twitter", "x", "cli", "feed", "timeline"]
 classifiers = [
@@ -24,7 +24,7 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "PyYAML>=6.0",
-    "curl_cffi>=0.7",
+    "wreq>=0.12.0",
     "xclienttransaction>=1.0.1",
     "beautifulsoup4>=4.12",
 ]
