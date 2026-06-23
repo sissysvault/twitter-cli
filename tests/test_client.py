@@ -14,6 +14,10 @@ import pytest
 
 from twitter_cli.client import (
     _best_chrome_target,
+    _CREATE_TWEET_FEATURES,
+    _fallback_ondemand_file_url,
+    _WreqResponseCompat,
+    Profile,
     TwitterClient,
 )
 from twitter_cli.exceptions import TwitterAPIError
@@ -214,17 +218,35 @@ class TestBuildGraphqlUrl:
 # ── _best_chrome_target ──────────────────────────────────────────────────
 
 class TestBestChromeTarget:
-    def test_returns_string(self):
+    def test_returns_latest_available_chrome_profile(self):
         target = _best_chrome_target()
         assert isinstance(target, str)
-        assert "chrome" in target
+        assert target.startswith("chrome")
+        assert int(target.replace("chrome", "")) == max(
+            int(name.replace("Chrome", ""))
+            for name in dir(Profile)
+            if name.startswith("Chrome") and name.replace("Chrome", "").isdigit()
+        )
 
-    def test_fallback_when_no_browser_type(self):
-        with patch.dict("sys.modules", {"curl_cffi.requests": MagicMock(BrowserType=MagicMock(side_effect=TypeError))}):
-            # Force re-evaluation by clearing cached result
-            # When BrowserType iteration fails, should still return a fallback
+    def test_fallback_when_profiles_unavailable(self):
+        class BrokenProfile:
+            pass
+
+        with patch("twitter_cli.client.Profile", BrokenProfile()):
             target = _best_chrome_target()
-            assert isinstance(target, str)
+            assert target == "chrome131"
+
+
+class TestWreqResponseCompat:
+    def test_status_code_uses_wreq_as_int(self):
+        class Status:
+            def as_int(self):
+                return 202
+
+        response = MagicMock()
+        response.status = Status()
+
+        assert _WreqResponseCompat(response).status_code == 202
 
 
 # ── _update_features_from_html ───────────────────────────────────────────
@@ -266,9 +288,8 @@ class TestUpdateFeaturesFromHtml:
 # ── TwitterClient._build_headers ─────────────────────────────────────────
 
 class TestBuildHeaders:
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_required_headers_present(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_required_headers_present(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip init"))
 
@@ -291,22 +312,18 @@ class TestBuildHeaders:
         assert headers["X-Twitter-Auth-Type"] == "OAuth2Session"
         assert "User-Agent" in headers
         assert "sec-ch-ua" in headers
+        assert "sec-ch-ua-full-version" not in headers
+        assert "sec-ch-ua-arch" not in headers
 
     @patch("twitter_cli.client.get_sec_ch_ua_platform", return_value='"Linux"')
-    @patch("twitter_cli.client.get_sec_ch_ua_platform_version", return_value='""')
-    @patch("twitter_cli.client.get_sec_ch_ua_arch", return_value='"x86"')
-    @patch("twitter_cli.client.get_accept_language", return_value="zh-CN,zh;q=0.9,en;q=0.8")
+    @patch("twitter_cli.client.get_accept_language", return_value="zh-CN,zh;q=0.9")
     @patch("twitter_cli.client.get_twitter_client_language", return_value="zh")
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
+    @patch("twitter_cli.client._get_wreq_session")
     def test_cookie_string_used_when_available(
         self,
-        mock_ct_headers,
         mock_session,
         mock_client_language,
         mock_accept_language,
-        mock_arch,
-        mock_platform_version,
         mock_platform,
     ):
         mock_session.return_value = MagicMock()
@@ -326,10 +343,38 @@ class TestBuildHeaders:
         headers = client._build_headers()
         assert headers["Cookie"] == "auth_token=x; ct0=y; other=z"
         assert headers["X-Twitter-Client-Language"] == "zh"
-        assert headers["Accept-Language"] == "zh-CN,zh;q=0.9,en;q=0.8"
+        assert headers["Accept-Language"] == "zh-CN,zh;q=0.9"
         assert headers["sec-ch-ua-platform"] == '"Linux"'
-        assert headers["sec-ch-ua-arch"] == '"x86"'
-        assert headers["sec-ch-ua-platform-version"] == '""'
+
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_graphql_post_uses_home_referer(self, mock_session):
+        mock_session.return_value = MagicMock()
+        client = TwitterClient.__new__(TwitterClient)
+        client._auth_token = "token"
+        client._ct0 = "ct0"
+        client._cookie_string = None
+        client._client_transaction = None
+
+        headers = client._build_headers("https://x.com/i/api/graphql/q/CreateTweet", "POST")
+
+        assert headers["Referer"] == "https://x.com/home"
+        assert headers["Sec-Fetch-Site"] == "same-origin"
+        assert headers["Content-Type"] == "application/json"
+        assert headers["Priority"] == "u=1, i"
+
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_upload_headers_use_same_site(self, mock_session):
+        mock_session.return_value = MagicMock()
+        client = TwitterClient.__new__(TwitterClient)
+        client._auth_token = "token"
+        client._ct0 = "ct0"
+        client._cookie_string = None
+        client._client_transaction = None
+
+        headers = client._build_headers("https://upload.x.com/i/media/upload.json", "POST")
+
+        assert headers["Referer"] == "https://x.com/"
+        assert headers["Sec-Fetch-Site"] == "same-site"
 
 
 class TestPaginationBehavior:
@@ -877,9 +922,8 @@ class TestParseTweetResult:
         "views": {"count": "5000"},
     }
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_parses_basic_tweet(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_parses_basic_tweet(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -898,9 +942,8 @@ class TestParseTweetResult:
         assert tweet.lang == "en"
         assert tweet.is_retweet is False
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_parses_tombstone_returns_none(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_parses_tombstone_returns_none(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -911,9 +954,8 @@ class TestParseTweetResult:
         result = {"__typename": "TweetTombstone"}
         assert parse_tweet_result(result) is None
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_parses_visibility_wrapper(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_parses_visibility_wrapper(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -930,9 +972,8 @@ class TestParseTweetResult:
         assert tweet.id == "1234567890"
         assert tweet.is_subscriber_only is False
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_parses_outer_visibility_wrapper_for_retweet(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_parses_outer_visibility_wrapper_for_retweet(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -997,9 +1038,8 @@ class TestParseTweetResult:
         assert tweet.is_retweet is True
         assert tweet.is_subscriber_only is True
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_depth_limit(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_depth_limit(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -1009,9 +1049,8 @@ class TestParseTweetResult:
 
         assert parse_tweet_result(self.SAMPLE_TWEET_RESULT, depth=3) is None
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_article_atomic_image_block_renders_markdown_image(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_article_atomic_image_block_renders_markdown_image(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -1050,9 +1089,8 @@ class TestParseTweetResult:
         assert tweet.article_title == "Article title"
         assert tweet.article_text == "Intro\n\n![A cat](https://pbs.twimg.com/media/cat.jpg)\n\nOutro"
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_article_atomic_image_block_supports_list_entity_map_and_media_entities(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_article_atomic_image_block_supports_list_entity_map_and_media_entities(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -1091,9 +1129,8 @@ class TestParseTweetResult:
         assert tweet is not None
         assert tweet.article_text == "Intro\n\n![](https://pbs.twimg.com/media/example.png)\n\nOutro"
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_article_real_shape_odysseus_like_payload_renders_two_images(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_article_real_shape_odysseus_like_payload_renders_two_images(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -1147,9 +1184,8 @@ class TestParseTweetResult:
             "Last paragraph"
         )
 
-    @patch("twitter_cli.client._get_cffi_session")
-    @patch("twitter_cli.client._gen_ct_headers", return_value={})
-    def test_article_real_shape_elvissun_like_payload_renders_caption_and_three_images(self, mock_ct_headers, mock_session):
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_article_real_shape_elvissun_like_payload_renders_caption_and_three_images(self, mock_session):
         mock_session.return_value = MagicMock()
         mock_session.return_value.get = MagicMock(side_effect=Exception("skip"))
 
@@ -1360,7 +1396,7 @@ class TestUploadMedia:
         client._ct_init_attempted = True
         return client
 
-    @patch("twitter_cli.client._get_cffi_session")
+    @patch("twitter_cli.client._get_wreq_session")
     def test_upload_media_init_append_finalize(self, mock_session, tmp_path):
         """Happy path: INIT → APPEND → FINALIZE returns media_id."""
         img = tmp_path / "photo.jpg"
@@ -1421,7 +1457,7 @@ class TestUploadMedia:
 class TestCreateTweetWithMedia:
     """Tests that media_ids are correctly passed into CreateTweet variables."""
 
-    @patch("twitter_cli.client._get_cffi_session")
+    @patch("twitter_cli.client._get_wreq_session")
     def test_create_tweet_with_media_ids(self, mock_session):
         sess = MagicMock()
         mock_session.return_value = sess
@@ -1438,9 +1474,11 @@ class TestCreateTweetWithMedia:
         client._ct_init_attempted = True
 
         captured_body = {}
+        captured_features = {}
 
         def mock_graphql_post(operation_name, variables, features=None):
             captured_body.update(variables)
+            captured_features.update(features or {})
             return {"data": {"create_tweet": {"tweet_results": {"result": {"rest_id": "99"}}}}}
 
         client._graphql_post = mock_graphql_post
@@ -1452,8 +1490,11 @@ class TestCreateTweetWithMedia:
         assert len(entities) == 2
         assert entities[0]["media_id"] == "111"
         assert entities[1]["media_id"] == "222"
+        assert captured_features == _CREATE_TWEET_FEATURES
+        assert captured_body["disallowed_reply_options"] is None
+        assert captured_body["semantic_annotation_options"] is None
 
-    @patch("twitter_cli.client._get_cffi_session")
+    @patch("twitter_cli.client._get_wreq_session")
     def test_create_tweet_without_media_ids(self, mock_session):
         sess = MagicMock()
         mock_session.return_value = sess
@@ -1480,6 +1521,22 @@ class TestCreateTweetWithMedia:
         result = client.create_tweet("no media")
         assert result == "88"
         assert captured_body["media"]["media_entities"] == []
+
+    def test_create_tweet_error_reports_response_shape(self):
+        client = TwitterClient.__new__(TwitterClient)
+
+        with pytest.raises(TwitterAPIError, match="create_tweet keys: errors"):
+            client._extract_created_tweet_id({"data": {"create_tweet": {"errors": []}}})
+
+
+class TestClientTransactionBootstrap:
+    def test_fallback_ondemand_file_url_extracts_current_chunk_map(self):
+        html = 'self.webpackChunk=[{u:{59924:"ondemand.s"},h:{59924:"424c45a"}}]'
+
+        assert (
+            _fallback_ondemand_file_url(html)
+            == "https://abs.twimg.com/responsive-web/client-web/ondemand.s.424c45aa.js"
+        )
 
 
 # ── fetch_search uses POST ────────────────────────────────────────────────
