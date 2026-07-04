@@ -707,8 +707,9 @@ def test_cli_follow_json_output(monkeypatch) -> None:
             assert identifier == "alice"
             return "42"
 
-        def follow_user(self, user_id: str) -> bool:
+        def follow_user(self, user_id: str, screen_name=None) -> bool:
             assert user_id == "42"
+            assert screen_name == "alice"
             return True
 
     monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
@@ -729,8 +730,8 @@ def test_cli_follow_command(monkeypatch) -> None:
         def resolve_user_id(self, identifier: str) -> str:
             return "42"
 
-        def follow_user(self, user_id: str) -> bool:
-            actions.append(("follow", user_id))
+        def follow_user(self, user_id: str, screen_name=None) -> bool:
+            actions.append(("follow", user_id, screen_name))
             return True
 
     monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
@@ -738,7 +739,7 @@ def test_cli_follow_command(monkeypatch) -> None:
 
     result = runner.invoke(cli, ["follow", "alice"])
     assert result.exit_code == 0
-    assert actions == [("follow", "42")]
+    assert actions == [("follow", "42", "alice")]
 
 
 def test_cli_unfollow_command(monkeypatch) -> None:
@@ -748,8 +749,8 @@ def test_cli_unfollow_command(monkeypatch) -> None:
         def resolve_user_id(self, identifier: str) -> str:
             return "42"
 
-        def unfollow_user(self, user_id: str) -> bool:
-            actions.append(("unfollow", user_id))
+        def unfollow_user(self, user_id: str, screen_name=None) -> bool:
+            actions.append(("unfollow", user_id, screen_name))
             return True
 
     monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
@@ -757,7 +758,7 @@ def test_cli_unfollow_command(monkeypatch) -> None:
 
     result = runner.invoke(cli, ["unfollow", "alice"])
     assert result.exit_code == 0
-    assert actions == [("unfollow", "42")]
+    assert actions == [("unfollow", "42", "alice")]
 
 
 def test_cli_join_community_accepts_url(monkeypatch) -> None:

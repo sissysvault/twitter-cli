@@ -1368,7 +1368,7 @@ def follow_user(screen_name, as_json, as_yaml):
 
     def operation(client: TwitterClient) -> WritePayload:
         user_id = client.resolve_user_id(screen_name)
-        client.follow_user(user_id)
+        client.follow_user(user_id, screen_name=screen_name)
         return {"success": True, "action": "follow", "screenName": screen_name, "userId": user_id}
 
     _run_write_command(
@@ -1391,7 +1391,7 @@ def unfollow_user(screen_name, as_json, as_yaml):
 
     def operation(client: TwitterClient) -> WritePayload:
         user_id = client.resolve_user_id(screen_name)
-        client.unfollow_user(user_id)
+        client.unfollow_user(user_id, screen_name=screen_name)
         return {"success": True, "action": "unfollow", "screenName": screen_name, "userId": user_id}
 
     _run_write_command(

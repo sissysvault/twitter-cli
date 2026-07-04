@@ -1658,6 +1658,55 @@ class TestCreateTweetWithMedia:
             client._extract_created_tweet_id({"data": {"create_tweet": {"errors": []}}})
 
 
+class TestFriendships:
+    def _make_client(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._auth_token = "tok"
+        client._ct0 = "ct0"
+        client._cookie_string = None
+        client._request_delay = 0
+        client._max_retries = 0
+        client._retry_base_delay = 0
+        client._max_count = 200
+        client._client_transaction = None
+        client._ct_init_attempted = True
+        return client
+
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_follow_user_uses_har_form_body_and_profile_referer(self, mock_session):
+        response = MagicMock()
+        response.status_code = 200
+        sess = MagicMock()
+        sess.post.return_value = response
+        mock_session.return_value = sess
+
+        client = self._make_client()
+        assert client.follow_user("1673006288", screen_name="AMIT_GUJJU") is True
+
+        call = sess.post.call_args.kwargs
+        assert call["data"] == TwitterClient._friendship_body("1673006288")
+        assert call["headers"]["Referer"] == "https://x.com/AMIT_GUJJU"
+        assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+        assert "include_ext_is_blue_verified" in call["data"]
+        assert call["data"]["skip_status"] == "1"
+
+    @patch("twitter_cli.client._get_wreq_session")
+    def test_unfollow_user_uses_har_form_body_and_profile_referer(self, mock_session):
+        response = MagicMock()
+        response.status_code = 200
+        sess = MagicMock()
+        sess.post.return_value = response
+        mock_session.return_value = sess
+
+        client = self._make_client()
+        assert client.unfollow_user("1673006288", screen_name="@AMIT_GUJJU") is True
+
+        call = sess.post.call_args.kwargs
+        assert call["data"] == TwitterClient._friendship_body("1673006288")
+        assert call["headers"]["Referer"] == "https://x.com/AMIT_GUJJU"
+        assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+
+
 class TestJoinCommunity:
     def test_join_community_uses_har_payload(self):
         client = TwitterClient.__new__(TwitterClient)

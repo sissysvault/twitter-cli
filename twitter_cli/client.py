@@ -1012,13 +1012,43 @@ class TwitterClient:
         self._write_delay()
         return self._extract_created_tweet_id(data)
 
-    def follow_user(self, user_id):
-        # type: (str) -> bool
+    @staticmethod
+    def _friendship_body(user_id):
+        # type: (str) -> Dict[str, str]
+        """Return the browser-shaped follow/unfollow form body."""
+        return {
+            "include_profile_interstitial_type": "1",
+            "include_blocking": "1",
+            "include_blocked_by": "1",
+            "include_followed_by": "1",
+            "include_want_retweets": "1",
+            "include_mute_edge": "1",
+            "include_can_dm": "1",
+            "include_can_media_tag": "1",
+            "include_ext_is_blue_verified": "1",
+            "include_ext_verified_type": "1",
+            "include_ext_profile_image_shape": "1",
+            "skip_status": "1",
+            "user_id": user_id,
+        }
+
+    @staticmethod
+    def _profile_referer(screen_name):
+        # type: (Optional[str]) -> Optional[str]
+        if not screen_name:
+            return None
+        return "https://x.com/%s" % screen_name.lstrip("@")
+
+    def follow_user(self, user_id, screen_name=None):
+        # type: (str, Optional[str]) -> bool
         """Follow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/create.json"
-        body = {"user_id": user_id, "include_profile_interstitial_type": "1"}
+        body = self._friendship_body(user_id)
         session = _get_wreq_session()
         headers = self._build_headers(url=url, method="POST")
+        referer = self._profile_referer(screen_name)
+        if referer:
+            headers["Referer"] = referer
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
@@ -1026,13 +1056,16 @@ class TwitterClient:
         self._write_delay()
         return True
 
-    def unfollow_user(self, user_id):
-        # type: (str) -> bool
+    def unfollow_user(self, user_id, screen_name=None):
+        # type: (str, Optional[str]) -> bool
         """Unfollow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/destroy.json"
-        body = {"user_id": user_id, "include_profile_interstitial_type": "1"}
+        body = self._friendship_body(user_id)
         session = _get_wreq_session()
         headers = self._build_headers(url=url, method="POST")
+        referer = self._profile_referer(screen_name)
+        if referer:
+            headers["Referer"] = referer
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
