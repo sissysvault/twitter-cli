@@ -42,6 +42,7 @@ A terminal-first CLI for Twitter/X: read timelines, bookmarks, and user profiles
 - Delete: remove your own tweets
 - Like / Unlike: manage tweet likes
 - Retweet / Unretweet: manage retweets
+- Bulk unfollow: preview or unfollow every account you follow with `unfollow-all`
 - Bookmark: bookmark/unbookmark (`favorite/unfavorite` kept as compatibility aliases)
 - Write commands also support explicit `--json` / `--yaml` output now
 
@@ -162,6 +163,7 @@ twitter join-community 1888295307949048263
 twitter post "reply text" --reply-to 1234567890
 twitter reply 1234567890 "Nice!" -i screenshot.png  # Reply with image
 twitter quote 1234567890 "Look" -i chart.png        # Quote with image
+twitter unfollow-all --dry-run --max 10              # Preview bulk unfollow
 twitter post "Hello from twitter-cli!" --json
 twitter delete 1234567890
 twitter like 1234567890
@@ -488,6 +490,7 @@ twitter join-community 1888295307949048263
 twitter post "回复内容" --reply-to 1234567890
 twitter reply 1234567890 "回复" -i screenshot.png   # 带图回复
 twitter quote 1234567890 "评论" -i chart.png        # 带图引用
+twitter unfollow-all --dry-run --max 10              # 预览批量取关
 twitter post "你好，世界！" --json
 twitter delete 1234567890
 twitter like 1234567890

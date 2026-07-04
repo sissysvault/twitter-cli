@@ -23,6 +23,7 @@ Write commands:
     twitter post "text" -i photo.jpg  # post with image(s)
     twitter post "text" -v clip.mp4   # post with a video
     twitter join-community <id>       # join a community
+    twitter unfollow-all              # unfollow every account you follow
     twitter reply <id> "text"         # reply to a tweet
     twitter quote <id> "text"         # quote-tweet
     twitter delete <id>               # delete a tweet
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import sys
 import time
@@ -1402,6 +1404,75 @@ def unfollow_user(screen_name, as_json, as_yaml):
         success_lines=["[green]✅ Unfollowed @%s[/green]" % screen_name],
         error_details={"action": "unfollow", "screenName": screen_name},
     )
+
+
+@cli.command(name="unfollow-all")
+@click.option("--max", "-n", "max_count", type=int, default=None, help="Maximum accounts to unfollow.")
+@click.option("--dry-run", is_flag=True, help="Only list how many accounts would be unfollowed.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@structured_output_options
+def unfollow_all(max_count, dry_run, yes, as_json, as_yaml):
+    # type: (Optional[int], bool, bool, bool, bool) -> None
+    """Unfollow every account the authenticated user is following."""
+    if max_count is not None and max_count <= 0:
+        raise click.UsageError("--max must be greater than 0")
+    rich_output = not _structured_mode(as_json=as_json, as_yaml=as_yaml)
+
+    def operation(client: TwitterClient) -> WritePayload:
+        me = client.fetch_me()
+        users = client.fetch_all_following(me.id, max_count=max_count)
+        sample = [
+            {"id": user.id, "screenName": user.screen_name, "name": user.name}
+            for user in users[:20]
+        ]
+
+        if dry_run:
+            return {
+                "success": True,
+                "action": "unfollow_all",
+                "dryRun": True,
+                "count": len(users),
+                "sample": sample,
+            }
+
+        if not users:
+            return {"success": True, "action": "unfollow_all", "count": 0, "unfollowed": []}
+
+        if not yes:
+            click.confirm(
+                "Unfollow %d accounts from @%s?" % (len(users), me.screen_name),
+                abort=True,
+            )
+
+        unfollowed = []
+        for index, user in enumerate(users, 1):
+            if rich_output:
+                console.print("➖ [%d/%d] @%s" % (index, len(users), user.screen_name or user.id))
+            client.unfollow_user(user.id, screen_name=user.screen_name, write_delay=False)
+            unfollowed.append({"id": user.id, "screenName": user.screen_name})
+            if index < len(users):
+                delay = random.uniform(1.0, 3.0)
+                if rich_output:
+                    console.print("⏳ Waiting %.1fs..." % delay)
+                time.sleep(delay)
+
+        return {
+            "success": True,
+            "action": "unfollow_all",
+            "count": len(unfollowed),
+            "unfollowed": unfollowed,
+        }
+
+    payload = _run_write_command(
+        as_json=as_json,
+        as_yaml=as_yaml,
+        operation=operation,
+        progress_lines=["👤 Fetching current user...", "👥 Fetching following list..."],
+        success_lines=["[green]✅ Unfollow-all complete.[/green]"],
+        error_details={"action": "unfollow_all", "dryRun": dry_run, "max": max_count},
+    )
+    if payload and dry_run and not _structured_mode(as_json=as_json, as_yaml=as_yaml):
+        console.print("Would unfollow %d accounts." % payload["count"])
 
 
 @cli.command(name="join-community")

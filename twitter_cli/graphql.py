@@ -37,7 +37,7 @@ FALLBACK_QUERY_IDS = {
     "Bookmarks": "2neUNDqrrFzbLui8yallcQ",
     "ListLatestTweetsTimeline": "RlZzktZY_9wJynoepm8ZsA",
     "Followers": "IOh4aS6UdGWGJUYTqliQ7Q",
-    "Following": "zx6e-TLzRkeDO_a7p4b3JQ",
+    "Following": "eNoXdfXv5rU75RBzlmfuPA",
     "CreateTweet": "R5EPiGHgSqbTYFyozd-gFw",
     "JoinCommunity": "EwWKbkzZVAZlW_LMnlQSag",
     "CommunitiesFetchOneQuery": "8R4ht9iT_gPYytCEmRAE_Q",

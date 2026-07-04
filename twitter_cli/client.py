@@ -623,6 +623,16 @@ class TwitterClient:
             use_post=True,
         )
 
+    def fetch_all_following(self, user_id, max_count=None):
+        # type: (str, Optional[int]) -> List[UserProfile]
+        """Fetch every account a user is following, optionally capped."""
+        return self._fetch_user_list(
+            "Following", user_id, max_count,
+            lambda data: _deep_get(data, "data", "user", "result", "timeline", "timeline", "instructions"),
+            use_post=True,
+            cap_to_config=False,
+        )
+
     # ── Write operations ─────────────────────────────────────────────
 
     # Supported media MIME types and size limits.
@@ -1039,8 +1049,8 @@ class TwitterClient:
             return None
         return "https://x.com/%s" % screen_name.lstrip("@")
 
-    def follow_user(self, user_id, screen_name=None):
-        # type: (str, Optional[str]) -> bool
+    def follow_user(self, user_id, screen_name=None, write_delay=True):
+        # type: (str, Optional[str], bool) -> bool
         """Follow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/create.json"
         body = self._friendship_body(user_id)
@@ -1053,11 +1063,12 @@ class TwitterClient:
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
             raise TwitterAPIError(response.status_code, "Failed to follow user")
-        self._write_delay()
+        if write_delay:
+            self._write_delay()
         return True
 
-    def unfollow_user(self, user_id, screen_name=None):
-        # type: (str, Optional[str]) -> bool
+    def unfollow_user(self, user_id, screen_name=None, write_delay=True):
+        # type: (str, Optional[str], bool) -> bool
         """Unfollow a user by user ID.  Returns True on success."""
         url = "https://x.com/i/api/1.1/friendships/destroy.json"
         body = self._friendship_body(user_id)
@@ -1070,7 +1081,8 @@ class TwitterClient:
         response = session.post(url, headers=headers, data=body, timeout=30)
         if response.status_code >= 400:
             raise TwitterAPIError(response.status_code, "Failed to unfollow user")
-        self._write_delay()
+        if write_delay:
+            self._write_delay()
         return True
 
     def join_community(self, community_id):
@@ -1212,24 +1224,26 @@ class TwitterClient:
             return tweets[:count], continuation_cursor
         return tweets[:count]
 
-    def _fetch_user_list(self, operation_name, user_id, count, get_instructions, use_post=False):
-        # type: (str, str, int, Callable[[Any], Any], bool) -> List[UserProfile]
+    def _fetch_user_list(self, operation_name, user_id, count, get_instructions, use_post=False, cap_to_config=True):
+        # type: (str, str, Optional[int], Callable[[Any], Any], bool, bool) -> List[UserProfile]
         """Generic user list fetcher (for followers/following) with pagination."""
-        if count <= 0:
+        if count is not None and count <= 0:
             return []
-        count = min(count, self._max_count)
+        limit = min(count, self._max_count) if cap_to_config and count is not None else count
         users = []  # type: List[UserProfile]
         seen_ids = set()  # type: Set[str]
         cursor = None  # type: Optional[str]
         attempts = 0
-        max_attempts = int(math.ceil(count / 20.0)) + 2
+        max_attempts = int(math.ceil(limit / 20.0)) + 2 if limit is not None else 10000
 
-        while len(users) < count and attempts < max_attempts:
+        while (limit is None or len(users) < limit) and attempts < max_attempts:
             attempts += 1
+            page_count = 40 if limit is None else min(limit - len(users) + 5, 40)
             variables = {
                 "userId": user_id,
-                "count": min(count - len(users) + 5, 40),
+                "count": page_count,
                 "includePromotedContent": False,
+                "withGrokTranslatedBio": True,
             }  # type: Dict[str, Any]
             if cursor:
                 variables["cursor"] = cursor
@@ -1277,10 +1291,10 @@ class TwitterClient:
             if not new_users:
                 logger.debug("User list page returned no users but exposed next cursor; continuing pagination")
 
-            if len(users) < count and self._request_delay > 0:
+            if (limit is None or len(users) < limit) and self._request_delay > 0:
                 time.sleep(self._request_delay * random.uniform(0.7, 1.5))
 
-        return users[:count]
+        return users if limit is None else users[:limit]
 
     # ── Internal: GraphQL request methods ────────────────────────────
 

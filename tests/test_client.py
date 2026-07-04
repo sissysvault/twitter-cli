@@ -29,6 +29,7 @@ from twitter_cli.graphql import (
     _build_graphql_url,
     _update_features_from_html,
 )
+from twitter_cli.models import UserProfile
 from twitter_cli.parser import (
     _deep_get,
     _extract_atomic_markdown,
@@ -571,6 +572,56 @@ class TestPaginationBehavior:
             users = client._fetch_user_list("Followers", "1", 1, _get_instructions)
 
         assert [user.screen_name for user in users] == ["alice"]
+
+    def test_fetch_all_following_uses_uncapped_following_pagination(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0.0
+        client._max_count = 1
+        captured = []
+
+        def _graphql_post(operation_name, variables, features=None):
+            captured.append((operation_name, variables))
+            return {"page": 1}
+
+        def _parse_user_result(data):
+            return UserProfile(id=data["id"], name=data["screen_name"], screen_name=data["screen_name"])
+
+        def _get_instructions(data):
+            return [
+                {
+                    "entries": [
+                        {
+                            "content": {
+                                "entryType": "TimelineTimelineItem",
+                                "itemContent": {"user_results": {"result": {"id": "user-1", "screen_name": "alice"}}},
+                            }
+                        },
+                        {
+                            "content": {
+                                "entryType": "TimelineTimelineItem",
+                                "itemContent": {"user_results": {"result": {"id": "user-2", "screen_name": "bob"}}},
+                            }
+                        },
+                    ]
+                }
+            ]
+
+        client._graphql_post = _graphql_post
+
+        with patch("twitter_cli.client.parse_user_result", side_effect=_parse_user_result):
+            users = client._fetch_user_list(
+                "Following",
+                "me",
+                None,
+                _get_instructions,
+                use_post=True,
+                cap_to_config=False,
+            )
+
+        assert [user.screen_name for user in users] == ["alice", "bob"]
+        assert captured[0][0] == "Following"
+        assert captured[0][1]["count"] == 40
+        assert captured[0][1]["withGrokTranslatedBio"] is True
 
 
 # ── Article parsing helpers ───────────────────────────────────────────────

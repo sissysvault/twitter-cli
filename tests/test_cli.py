@@ -761,6 +761,71 @@ def test_cli_unfollow_command(monkeypatch) -> None:
     assert actions == [("unfollow", "42", "alice")]
 
 
+def test_cli_unfollow_all_dry_run(monkeypatch) -> None:
+    class FakeClient:
+        def fetch_me(self) -> UserProfile:
+            return UserProfile(id="me", name="Me", screen_name="me")
+
+        def fetch_all_following(self, user_id: str, max_count=None):
+            assert user_id == "me"
+            assert max_count == 2
+            return [
+                UserProfile(id="1", name="Alice", screen_name="alice"),
+                UserProfile(id="2", name="Bob", screen_name="bob"),
+            ]
+
+        def unfollow_user(self, user_id: str, screen_name=None, write_delay=True) -> bool:  # pragma: no cover
+            raise AssertionError("dry-run should not unfollow")
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["unfollow-all", "--dry-run", "--max", "2", "--json"])
+
+    assert result.exit_code == 0
+    payload = yaml.safe_load(result.output)
+    assert payload["data"]["dryRun"] is True
+    assert payload["data"]["count"] == 2
+    assert payload["data"]["sample"][0]["screenName"] == "alice"
+
+
+def test_cli_unfollow_all_uses_human_delay(monkeypatch) -> None:
+    actions = []
+    sleeps = []
+
+    class FakeClient:
+        def fetch_me(self) -> UserProfile:
+            return UserProfile(id="me", name="Me", screen_name="me")
+
+        def fetch_all_following(self, user_id: str, max_count=None):
+            return [
+                UserProfile(id="1", name="Alice", screen_name="alice"),
+                UserProfile(id="2", name="Bob", screen_name="bob"),
+                UserProfile(id="3", name="Carol", screen_name="carol"),
+            ]
+
+        def unfollow_user(self, user_id: str, screen_name=None, write_delay=True) -> bool:
+            actions.append((user_id, screen_name, write_delay))
+            return True
+
+    monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
+    monkeypatch.setattr("twitter_cli.cli.random.uniform", lambda low, high: 1.7)
+    monkeypatch.setattr("twitter_cli.cli.time.sleep", lambda seconds: sleeps.append(seconds))
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["unfollow-all", "--yes", "--json"])
+
+    assert result.exit_code == 0
+    assert actions == [
+        ("1", "alice", False),
+        ("2", "bob", False),
+        ("3", "carol", False),
+    ]
+    assert sleeps == [1.7, 1.7]
+    payload = yaml.safe_load(result.output)
+    assert payload["data"]["count"] == 3
+
+
 def test_cli_join_community_accepts_url(monkeypatch) -> None:
     actions = []
 
