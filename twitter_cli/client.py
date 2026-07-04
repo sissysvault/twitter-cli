@@ -112,6 +112,8 @@ _JOIN_COMMUNITY_FEATURES = {
     "verified_phone_label_enabled": True,
 }
 
+_COMMUNITY_FETCH_ONE_FEATURES = _JOIN_COMMUNITY_FEATURES
+
 
 # ── Session management ───────────────────────────────────────────────────
 
@@ -1041,6 +1043,10 @@ class TwitterClient:
     def join_community(self, community_id):
         # type: (str) -> bool
         """Join an X Community by community ID. Returns True on success."""
+        if self.fetch_community_membership(community_id).get("isMember"):
+            logger.info("Already a member of community %s", community_id)
+            return True
+
         variables = {"communityId": community_id}
         data = self._graphql_post("JoinCommunity", variables, _JOIN_COMMUNITY_FEATURES)
         if not _deep_get(data, "data", "community_join"):
@@ -1048,6 +1054,33 @@ class TwitterClient:
             raise TwitterAPIError(0, "Failed to join community")
         self._write_delay()
         return True
+
+    def fetch_community_membership(self, community_id):
+        # type: (str) -> Dict[str, Any]
+        """Fetch viewer membership state for an X Community."""
+        variables = {
+            "communityId": community_id,
+            "withDmMuting": False,
+            "withGrokTranslatedBio": False,
+            "includeProfessionalCategory": True,
+        }
+        data = self._graphql_get("CommunitiesFetchOneQuery", variables, _COMMUNITY_FETCH_ONE_FEATURES)
+        result = _deep_get(data, "data", "communityResults", "result")
+        if not isinstance(result, dict):
+            logger.debug("CommunitiesFetchOneQuery response shape: %s", json.dumps(data, sort_keys=True)[:1000])
+            raise TwitterAPIError(0, "Failed to fetch community")
+
+        role = result.get("role")
+        join_result = _deep_get(result, "actions", "join_action_result")
+        join_reason = join_result.get("reason") if isinstance(join_result, dict) else None
+        is_member = role == "Member" or join_reason == "ViewerIsMember"
+        return {
+            "communityId": str(result.get("id_str") or community_id),
+            "name": result.get("name", ""),
+            "role": role,
+            "joinReason": join_reason,
+            "isMember": is_member,
+        }
 
     @staticmethod
     def _extract_created_tweet_id(data):

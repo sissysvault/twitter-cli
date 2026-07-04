@@ -40,6 +40,7 @@ FALLBACK_QUERY_IDS = {
     "Following": "zx6e-TLzRkeDO_a7p4b3JQ",
     "CreateTweet": "R5EPiGHgSqbTYFyozd-gFw",
     "JoinCommunity": "EwWKbkzZVAZlW_LMnlQSag",
+    "CommunitiesFetchOneQuery": "8R4ht9iT_gPYytCEmRAE_Q",
     "DeleteTweet": "VaenaVgh5q5ih7kvyVjgtg",
     "FavoriteTweet": "lI07N6Otwv1PhnEgXILM7A",
     "UnfavoriteTweet": "ZYKSe-w7KEslx3JhSIk5LA",

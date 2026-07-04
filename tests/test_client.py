@@ -14,6 +14,7 @@ import pytest
 
 from twitter_cli.client import (
     _best_chrome_target,
+    _COMMUNITY_FETCH_ONE_FEATURES,
     _CREATE_TWEET_FEATURES,
     _fallback_ondemand_file_url,
     _JOIN_COMMUNITY_FEATURES,
@@ -1671,19 +1672,70 @@ class TestJoinCommunity:
             return {"data": {"community_join": {"actions": {}}}}
 
         client._graphql_post = mock_graphql_post
+        client.fetch_community_membership = lambda community_id: {"isMember": False}
 
         assert client.join_community("1888295307949048263") is True
         assert captured["operation_name"] == "JoinCommunity"
         assert captured["variables"] == {"communityId": "1888295307949048263"}
         assert captured["features"] == _JOIN_COMMUNITY_FEATURES
 
+    def test_join_community_skips_mutation_when_already_member(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0
+        client.fetch_community_membership = lambda community_id: {"isMember": True}
+        client._graphql_post = lambda operation_name, variables, features=None: pytest.fail("should not join twice")
+
+        assert client.join_community("1888295307949048263") is True
+
     def test_join_community_errors_without_response_data(self):
         client = TwitterClient.__new__(TwitterClient)
         client._request_delay = 0
+        client.fetch_community_membership = lambda community_id: {"isMember": False}
         client._graphql_post = lambda operation_name, variables, features=None: {"data": {}}
 
         with pytest.raises(TwitterAPIError, match="Failed to join community"):
             client.join_community("1888295307949048263")
+
+    def test_fetch_community_membership_detects_member(self):
+        client = TwitterClient.__new__(TwitterClient)
+        captured = {}
+
+        def mock_graphql_get(operation_name, variables, features):
+            captured["operation_name"] = operation_name
+            captured["variables"] = variables
+            captured["features"] = features
+            return {
+                "data": {
+                    "communityResults": {
+                        "result": {
+                            "id_str": "1888295307949048263",
+                            "name": "Community",
+                            "role": "Member",
+                            "actions": {
+                                "join_action_result": {
+                                    "reason": "ViewerIsMember",
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+
+        client._graphql_get = mock_graphql_get
+
+        membership = client.fetch_community_membership("1888295307949048263")
+
+        assert membership["isMember"] is True
+        assert membership["role"] == "Member"
+        assert membership["joinReason"] == "ViewerIsMember"
+        assert captured["operation_name"] == "CommunitiesFetchOneQuery"
+        assert captured["variables"] == {
+            "communityId": "1888295307949048263",
+            "withDmMuting": False,
+            "withGrokTranslatedBio": False,
+            "includeProfessionalCategory": True,
+        }
+        assert captured["features"] == _COMMUNITY_FETCH_ONE_FEATURES
 
 
 class TestClientTransactionBootstrap:
