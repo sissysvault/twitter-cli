@@ -1420,7 +1420,19 @@ def unfollow_all(max_count, dry_run, yes, as_json, as_yaml):
 
     def operation(client: TwitterClient) -> WritePayload:
         me = client.fetch_me()
-        users = client.fetch_all_following(me.id, max_count=max_count)
+
+        def on_fetch_progress(total, added, has_more):
+            # type: (int, int, bool) -> None
+            if added:
+                console.print("  fetched %d accounts..." % total)
+            elif has_more:
+                console.print("  no new accounts on this page; checking next cursor...")
+
+        users = client.fetch_all_following(
+            me.id,
+            max_count=max_count,
+            progress_callback=on_fetch_progress if rich_output else None,
+        )
         sample = [
             {"id": user.id, "screenName": user.screen_name, "name": user.name}
             for user in users[:20]

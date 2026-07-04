@@ -578,6 +578,7 @@ class TestPaginationBehavior:
         client._request_delay = 0.0
         client._max_count = 1
         captured = []
+        progress = []
 
         def _graphql_post(operation_name, variables, features=None):
             captured.append((operation_name, variables))
@@ -616,12 +617,54 @@ class TestPaginationBehavior:
                 _get_instructions,
                 use_post=True,
                 cap_to_config=False,
+                progress_callback=lambda total, added, has_more: progress.append((total, added, has_more)),
             )
 
         assert [user.screen_name for user in users] == ["alice", "bob"]
         assert captured[0][0] == "Following"
         assert captured[0][1]["count"] == 40
         assert captured[0][1]["withGrokTranslatedBio"] is True
+        assert progress == [(2, 2, False)]
+
+    def test_fetch_user_list_stops_after_repeated_pages_without_new_users(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0.0
+        client._max_count = 1
+        calls = []
+        progress = []
+
+        def _graphql_get(operation_name, variables, features):
+            calls.append((operation_name, variables))
+            return {"cursor": "cursor-%d" % len(calls)}
+
+        def _get_instructions(data):
+            return [
+                {
+                    "entries": [
+                        {
+                            "content": {
+                                "entryType": "TimelineTimelineCursor",
+                                "cursorType": "Bottom",
+                                "value": data["cursor"],
+                            }
+                        }
+                    ]
+                }
+            ]
+
+        client._graphql_get = _graphql_get
+
+        users = client._fetch_user_list(
+            "Followers",
+            "me",
+            None,
+            _get_instructions,
+            progress_callback=lambda total, added, has_more: progress.append((total, added, has_more)),
+        )
+
+        assert users == []
+        assert len(calls) == 3
+        assert progress == [(0, 0, True), (0, 0, True), (0, 0, True)]
 
 
 # ── Article parsing helpers ───────────────────────────────────────────────

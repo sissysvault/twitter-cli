@@ -766,9 +766,10 @@ def test_cli_unfollow_all_dry_run(monkeypatch) -> None:
         def fetch_me(self) -> UserProfile:
             return UserProfile(id="me", name="Me", screen_name="me")
 
-        def fetch_all_following(self, user_id: str, max_count=None):
+        def fetch_all_following(self, user_id: str, max_count=None, progress_callback=None):
             assert user_id == "me"
             assert max_count == 2
+            assert progress_callback is None
             return [
                 UserProfile(id="1", name="Alice", screen_name="alice"),
                 UserProfile(id="2", name="Bob", screen_name="bob"),
@@ -797,7 +798,9 @@ def test_cli_unfollow_all_uses_human_delay(monkeypatch) -> None:
         def fetch_me(self) -> UserProfile:
             return UserProfile(id="me", name="Me", screen_name="me")
 
-        def fetch_all_following(self, user_id: str, max_count=None):
+        def fetch_all_following(self, user_id: str, max_count=None, progress_callback=None):
+            if progress_callback:
+                progress_callback(3, 3, False)
             return [
                 UserProfile(id="1", name="Alice", screen_name="alice"),
                 UserProfile(id="2", name="Bob", screen_name="bob"),

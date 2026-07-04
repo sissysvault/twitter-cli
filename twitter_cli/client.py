@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 _wreq_session = None
 
 TimelineInstructionGetter = Callable[[Any], Any]
+UserListProgressCallback = Callable[[int, int, bool], None]
 
 # Hard ceiling to prevent accidental massive fetches
 _ABSOLUTE_MAX_COUNT = 500
@@ -623,14 +624,15 @@ class TwitterClient:
             use_post=True,
         )
 
-    def fetch_all_following(self, user_id, max_count=None):
-        # type: (str, Optional[int]) -> List[UserProfile]
+    def fetch_all_following(self, user_id, max_count=None, progress_callback=None):
+        # type: (str, Optional[int], Optional[UserListProgressCallback]) -> List[UserProfile]
         """Fetch every account a user is following, optionally capped."""
         return self._fetch_user_list(
             "Following", user_id, max_count,
             lambda data: _deep_get(data, "data", "user", "result", "timeline", "timeline", "instructions"),
             use_post=True,
             cap_to_config=False,
+            progress_callback=progress_callback,
         )
 
     # ── Write operations ─────────────────────────────────────────────
@@ -1224,8 +1226,17 @@ class TwitterClient:
             return tweets[:count], continuation_cursor
         return tweets[:count]
 
-    def _fetch_user_list(self, operation_name, user_id, count, get_instructions, use_post=False, cap_to_config=True):
-        # type: (str, str, Optional[int], Callable[[Any], Any], bool, bool) -> List[UserProfile]
+    def _fetch_user_list(
+        self,
+        operation_name,
+        user_id,
+        count,
+        get_instructions,
+        use_post=False,
+        cap_to_config=True,
+        progress_callback=None,
+    ):
+        # type: (str, str, Optional[int], Callable[[Any], Any], bool, bool, Optional[UserListProgressCallback]) -> List[UserProfile]
         """Generic user list fetcher (for followers/following) with pagination."""
         if count is not None and count <= 0:
             return []
@@ -1235,6 +1246,7 @@ class TwitterClient:
         cursor = None  # type: Optional[str]
         attempts = 0
         max_attempts = int(math.ceil(limit / 20.0)) + 2 if limit is not None else 10000
+        empty_unique_pages = 0
 
         while (limit is None or len(users) < limit) and attempts < max_attempts:
             attempts += 1
@@ -1276,10 +1288,23 @@ class TwitterClient:
                         if content.get("cursorType") == "Bottom":
                             next_cursor = content.get("value")
 
+            previous_total = len(users)
+            unique_added = 0
             for user in new_users:
                 if user.id and user.id not in seen_ids:
                     seen_ids.add(user.id)
                     users.append(user)
+                    unique_added += 1
+
+            if unique_added:
+                empty_unique_pages = 0
+            else:
+                empty_unique_pages += 1
+
+            if progress_callback:
+                visible_total = len(users) if limit is None else min(len(users), limit)
+                previous_visible_total = previous_total if limit is None else min(previous_total, limit)
+                progress_callback(visible_total, visible_total - previous_visible_total, bool(next_cursor))
 
             if not next_cursor:
                 break
@@ -1288,8 +1313,11 @@ class TwitterClient:
                 break
             cursor = next_cursor
 
-            if not new_users:
-                logger.debug("User list page returned no users but exposed next cursor; continuing pagination")
+            if empty_unique_pages >= 3:
+                logger.debug("User list pagination stopped after %d pages without new users", empty_unique_pages)
+                break
+            if not unique_added:
+                logger.debug("User list page returned no new users but exposed next cursor; continuing pagination")
 
             if (limit is None or len(users) < limit) and self._request_delay > 0:
                 time.sleep(self._request_delay * random.uniform(0.7, 1.5))
