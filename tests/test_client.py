@@ -18,6 +18,7 @@ from twitter_cli.client import (
     _CREATE_TWEET_FEATURES,
     _fallback_ondemand_file_url,
     _JOIN_COMMUNITY_FEATURES,
+    _REQUEST_TO_JOIN_COMMUNITY_FEATURES,
     _WreqResponseCompat,
     Profile,
     TwitterClient,
@@ -1817,7 +1818,7 @@ class TestJoinCommunity:
         client._graphql_post = mock_graphql_post
         client.fetch_community_membership = lambda community_id: {"isMember": False}
 
-        assert client.join_community("1888295307949048263") is True
+        assert client.join_community("1888295307949048263") == "joined"
         assert captured["operation_name"] == "JoinCommunity"
         assert captured["variables"] == {"communityId": "1888295307949048263"}
         assert captured["features"] == _JOIN_COMMUNITY_FEATURES
@@ -1828,7 +1829,44 @@ class TestJoinCommunity:
         client.fetch_community_membership = lambda community_id: {"isMember": True}
         client._graphql_post = lambda operation_name, variables, features=None: pytest.fail("should not join twice")
 
-        assert client.join_community("1888295307949048263") is True
+        assert client.join_community("1888295307949048263") == "already_member"
+
+    def test_join_community_requests_when_required(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0
+
+        captured = {}
+
+        def mock_graphql_post(operation_name, variables, features=None):
+            captured["operation_name"] = operation_name
+            captured["variables"] = variables
+            captured["features"] = features
+            return {"data": {"community_join_request_create": {"__typename": "CommunityJoinRequest"}}}
+
+        client._graphql_post = mock_graphql_post
+        client.fetch_community_membership = lambda community_id: {
+            "isMember": False,
+            "canJoin": False,
+            "canRequestJoin": True,
+            "joinReason": "ViewerRequestRequired",
+        }
+
+        assert client.join_community("1863444310034702669") == "requested"
+        assert captured["operation_name"] == "RequestToJoinCommunity"
+        assert captured["variables"] == {"communityId": "1863444310034702669"}
+        assert captured["features"] == _REQUEST_TO_JOIN_COMMUNITY_FEATURES
+
+    def test_join_community_skips_when_request_pending(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0
+        client.fetch_community_membership = lambda community_id: {
+            "isMember": False,
+            "canJoin": False,
+            "joinReason": "ViewerRequestPending",
+        }
+        client._graphql_post = lambda operation_name, variables, features=None: pytest.fail("should not request twice")
+
+        assert client.join_community("1863444310034702669") == "request_pending"
 
     def test_join_community_errors_when_join_action_unavailable(self):
         client = TwitterClient.__new__(TwitterClient)
@@ -1891,6 +1929,7 @@ class TestJoinCommunity:
         assert membership["joinMessage"] == "You are already a member."
         assert membership["joinActionType"] == "CommunityJoinActionUnavailable"
         assert membership["canJoin"] is False
+        assert membership["canRequestJoin"] is False
         assert captured["operation_name"] == "CommunitiesFetchOneQuery"
         assert captured["variables"] == {
             "communityId": "1888295307949048263",

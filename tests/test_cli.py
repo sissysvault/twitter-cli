@@ -833,9 +833,9 @@ def test_cli_join_community_accepts_url(monkeypatch) -> None:
     actions = []
 
     class FakeClient:
-        def join_community(self, community_id: str) -> bool:
+        def join_community(self, community_id: str) -> str:
             actions.append(community_id)
-            return True
+            return "requested"
 
     monkeypatch.setattr("twitter_cli.cli._get_client", lambda config=None, quiet=False: FakeClient())
     runner = CliRunner()
@@ -851,6 +851,7 @@ def test_cli_join_community_accepts_url(monkeypatch) -> None:
     assert payload["ok"] is True
     assert payload["data"]["action"] == "join_community"
     assert payload["data"]["communityId"] == "1888295307949048263"
+    assert payload["data"]["status"] == "requested"
 
 
 def test_cli_search_advanced_options(monkeypatch) -> None:

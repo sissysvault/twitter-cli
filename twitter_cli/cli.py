@@ -1496,15 +1496,15 @@ def join_community(community, as_json, as_yaml):
     community_id = _normalize_community_id(community)
 
     def operation(client: TwitterClient) -> WritePayload:
-        client.join_community(community_id)
-        return {"success": True, "action": "join_community", "communityId": community_id}
+        status = client.join_community(community_id)
+        return {"success": True, "action": "join_community", "communityId": community_id, "status": status}
 
     _run_write_command(
         as_json=as_json,
         as_yaml=as_yaml,
         operation=operation,
         progress_lines=["➕ Joining community %s..." % community_id],
-        success_lines=["[green]✅ Joined community %s[/green]" % community_id],
+        success_lines=["[green]✅ Community action complete for %s[/green]" % community_id],
         error_details={"action": "join_community", "communityId": community_id},
     )
 

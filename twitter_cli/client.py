@@ -114,6 +114,7 @@ _JOIN_COMMUNITY_FEATURES = {
 }
 
 _COMMUNITY_FETCH_ONE_FEATURES = _JOIN_COMMUNITY_FEATURES
+_REQUEST_TO_JOIN_COMMUNITY_FEATURES = _JOIN_COMMUNITY_FEATURES
 
 
 # ── Session management ───────────────────────────────────────────────────
@@ -1088,12 +1089,18 @@ class TwitterClient:
         return True
 
     def join_community(self, community_id):
-        # type: (str) -> bool
-        """Join an X Community by community ID. Returns True on success."""
+        # type: (str) -> str
+        """Join or request to join an X Community by community ID."""
         membership = self.fetch_community_membership(community_id)
         if membership.get("isMember"):
             logger.info("Already a member of community %s", community_id)
-            return True
+            return "already_member"
+        join_reason = membership.get("joinReason")
+        if join_reason == "ViewerRequestPending":
+            logger.info("Join request already pending for community %s", community_id)
+            return "request_pending"
+        if join_reason == "ViewerRequestRequired":
+            return self.request_to_join_community(community_id)
         if membership.get("canJoin") is False:
             reason_parts = [
                 str(part)
@@ -1113,7 +1120,18 @@ class TwitterClient:
             logger.debug("JoinCommunity response shape: %s", json.dumps(data, sort_keys=True)[:1000])
             raise TwitterAPIError(0, "Failed to join community")
         self._write_delay()
-        return True
+        return "joined"
+
+    def request_to_join_community(self, community_id):
+        # type: (str) -> str
+        """Request moderator approval to join a restricted X Community."""
+        variables = {"communityId": community_id}
+        data = self._graphql_post("RequestToJoinCommunity", variables, _REQUEST_TO_JOIN_COMMUNITY_FEATURES)
+        if not _deep_get(data, "data", "community_join_request_create"):
+            logger.debug("RequestToJoinCommunity response shape: %s", json.dumps(data, sort_keys=True)[:1000])
+            raise TwitterAPIError(0, "Failed to request community join")
+        self._write_delay()
+        return "requested"
 
     def fetch_community_membership(self, community_id):
         # type: (str) -> Dict[str, Any]
@@ -1136,10 +1154,12 @@ class TwitterClient:
         join_message = None
         join_action_type = None
         can_join = True
+        can_request_join = False
         if isinstance(join_result, dict):
             join_reason = join_result.get("reason")
             join_message = join_result.get("message")
             join_action_type = join_result.get("__typename") or join_result.get("__isCommunityJoinActionResult")
+            can_request_join = join_reason == "ViewerRequestRequired"
             if join_action_type and str(join_action_type).endswith("Unavailable"):
                 can_join = False
         is_member = role == "Member" or join_reason == "ViewerIsMember"
@@ -1151,6 +1171,7 @@ class TwitterClient:
             "joinMessage": join_message,
             "joinActionType": join_action_type,
             "canJoin": can_join,
+            "canRequestJoin": can_request_join,
             "isMember": is_member,
         }
 
