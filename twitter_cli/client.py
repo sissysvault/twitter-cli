@@ -1090,9 +1090,22 @@ class TwitterClient:
     def join_community(self, community_id):
         # type: (str) -> bool
         """Join an X Community by community ID. Returns True on success."""
-        if self.fetch_community_membership(community_id).get("isMember"):
+        membership = self.fetch_community_membership(community_id)
+        if membership.get("isMember"):
             logger.info("Already a member of community %s", community_id)
             return True
+        if membership.get("canJoin") is False:
+            reason_parts = [
+                str(part)
+                for part in (
+                    membership.get("joinMessage"),
+                    membership.get("joinReason"),
+                    membership.get("joinActionType"),
+                )
+                if part
+            ]
+            reason = " / ".join(reason_parts) if reason_parts else "join action unavailable"
+            raise TwitterAPIError(0, "Cannot join community %s: %s" % (community_id, reason))
 
         variables = {"communityId": community_id}
         data = self._graphql_post("JoinCommunity", variables, _JOIN_COMMUNITY_FEATURES)
@@ -1119,13 +1132,25 @@ class TwitterClient:
 
         role = result.get("role")
         join_result = _deep_get(result, "actions", "join_action_result")
-        join_reason = join_result.get("reason") if isinstance(join_result, dict) else None
+        join_reason = None
+        join_message = None
+        join_action_type = None
+        can_join = True
+        if isinstance(join_result, dict):
+            join_reason = join_result.get("reason")
+            join_message = join_result.get("message")
+            join_action_type = join_result.get("__typename") or join_result.get("__isCommunityJoinActionResult")
+            if join_action_type and str(join_action_type).endswith("Unavailable"):
+                can_join = False
         is_member = role == "Member" or join_reason == "ViewerIsMember"
         return {
             "communityId": str(result.get("id_str") or community_id),
             "name": result.get("name", ""),
             "role": role,
             "joinReason": join_reason,
+            "joinMessage": join_message,
+            "joinActionType": join_action_type,
+            "canJoin": can_join,
             "isMember": is_member,
         }
 

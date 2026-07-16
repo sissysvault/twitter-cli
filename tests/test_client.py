@@ -1830,6 +1830,21 @@ class TestJoinCommunity:
 
         assert client.join_community("1888295307949048263") is True
 
+    def test_join_community_errors_when_join_action_unavailable(self):
+        client = TwitterClient.__new__(TwitterClient)
+        client._request_delay = 0
+        client.fetch_community_membership = lambda community_id: {
+            "isMember": False,
+            "canJoin": False,
+            "joinMessage": "Only approved members can join.",
+            "joinReason": "Unavailable",
+            "joinActionType": "CommunityJoinActionUnavailable",
+        }
+        client._graphql_post = lambda operation_name, variables, features=None: pytest.fail("should not join unavailable")
+
+        with pytest.raises(TwitterAPIError, match="Cannot join community"):
+            client.join_community("1888295307949048263")
+
     def test_join_community_errors_without_response_data(self):
         client = TwitterClient.__new__(TwitterClient)
         client._request_delay = 0
@@ -1856,6 +1871,8 @@ class TestJoinCommunity:
                             "role": "Member",
                             "actions": {
                                 "join_action_result": {
+                                    "__typename": "CommunityJoinActionUnavailable",
+                                    "message": "You are already a member.",
                                     "reason": "ViewerIsMember",
                                 }
                             },
@@ -1871,6 +1888,9 @@ class TestJoinCommunity:
         assert membership["isMember"] is True
         assert membership["role"] == "Member"
         assert membership["joinReason"] == "ViewerIsMember"
+        assert membership["joinMessage"] == "You are already a member."
+        assert membership["joinActionType"] == "CommunityJoinActionUnavailable"
+        assert membership["canJoin"] is False
         assert captured["operation_name"] == "CommunitiesFetchOneQuery"
         assert captured["variables"] == {
             "communityId": "1888295307949048263",
